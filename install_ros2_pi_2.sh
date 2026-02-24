@@ -1,0 +1,16 @@
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+sudo apt update
+sudo apt install -y curl software-properties-common locales
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
+sudo add-apt-repository universe -y
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+sudo apt update
+sudo apt install -y ros-humble-ros-base python3-argcomplete python3-colcon-common-extensions
+if ! grep -q "source /opt/ros/humble/setup.bash" ~/.bashrc; then
+    echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+fi
+echo "SUCCESS_ROS2_INSTALL"
