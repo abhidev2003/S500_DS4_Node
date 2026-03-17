@@ -1,9 +1,27 @@
+# ROS 2 Workspace Build Directories
 build/
 install/
 log/
-.vscode/
-compile_commands.json
+logs/
+
+# Colcon
+.colcon/
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDEs
+.vscode/
 .idea/
-.DS_Store
+*.swp
+*.swo

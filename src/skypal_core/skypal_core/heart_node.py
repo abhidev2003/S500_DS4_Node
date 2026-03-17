@@ -1,78 +1,107 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.clock import Clock
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Header, String
-from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleAttitude
+from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleLocalPosition
 import math
+import os
+import time
 
 class HeartNode(Node):
     def __init__(self):
         super().__init__('skypal_core_heart_node')
         
-        # Configure QoS profile for publishing and subscribing to px4_msgs
         qos_profile = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1
         )
         
-        # Subscriptions from VPN (Controller)
-        self.cmd_sub = self.create_subscription(Twist, '/skypal/cmd_vel', self.cmd_callback, 10)
-        self.heartbeat_sub = self.create_subscription(Header, '/skypal/heartbeat', self.heartbeat_callback, 10)
+        # Subscriptions from Skypal Controller
+        self.cmd_sub = self.create_subscription(Twist, '/skypal/cmd_vel', self.cmd_callback, qos_profile)
         self.sys_cmd_sub = self.create_subscription(String, '/skypal/sys_command', self.sys_cmd_callback, 10)
+        self.heartbeat_sub = self.create_subscription(Header, '/skypal/heartbeat', self.heartbeat_callback, 10)
         
-        # Subscriptions from PX4 (Agent)
-        self.status_sub = self.create_subscription(VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile)
-        self.attitude_sub = self.create_subscription(VehicleAttitude, '/fmu/out/vehicle_attitude', self.attitude_callback, qos_profile)
+        # Providers for Position Integration
+        self.current_x = 0.0
+        self.current_y = 0.0
+        self.current_z = 0.0
+        self.current_yaw = 0.0
         
-        # Publishers to PX4
-        self.offboard_control_mode_publisher = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', qos_profile)
-        self.trajectory_setpoint_publisher = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_profile)
-        self.vehicle_command_publisher = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
+        self.target_x = 0.0
+        self.target_y = 0.0
+        self.target_z = 0.0
+        self.target_yaw = 0.0
         
-        # State
+        # Velocity Smoothing (Low-Pass Filter)
+        self.smooth_v_body_x = 0.0
+        self.smooth_v_body_y = 0.0
+        self.smooth_v_down = 0.0
+        self.smooth_v_yaw = 0.0
+        self.alpha_v = 0.4 # EMA Smoothing Factor (0.0=Static to 1.0=Instant)
+        
+        self.local_pos_sub = self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.local_pos_callback, qos_profile)
+        
+        # Publishers to PX4 (XRCE-DDS)
+        self.offboard_mode_pub = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
+        self.trajectory_pub = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
+        self.vehicle_command_pub = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', 10)
+        
+        # State Variables
         self.last_heartbeat_time = self.get_clock().now()
         self.last_cmd = Twist()
         self.failsafe_triggered = False
         self.offboard_engaged = False
-        self.max_latency_sec = 0.5  # 500ms
+        self.max_latency_sec = 2.0 # Increased for Mobile Network (JIOPAL) Jitter Tolerance
+        self.dt = 0.05 # 20Hz loop
         
-        self.nav_state = VehicleStatus.NAVIGATION_STATE_MAX
-        self.arming_state = VehicleStatus.ARMING_STATE_STANDBY
-        self.current_yaw = 0.0
+        self.nav_state = 14 # VehicleStatus.NAVIGATION_STATE_MAX
+        self.arming_state = 1 # VehicleStatus.ARMING_STATE_DISARMED
         
         # Timers
         self.monitor_timer = self.create_timer(0.1, self.monitor_connection)     # 10Hz Monitor
-        self.offboard_timer = self.create_timer(0.05, self.publish_offboard_heartbeat) # 20Hz Setpoint Publisher
+        self.offboard_timer = self.create_timer(self.dt, self.publish_offboard_heartbeat) # 20Hz Setpoint Publisher
         
-        self.get_logger().info('Skypal Core Heart Node Initialized. Ready for Offboard Commands.')
+        self.declare_parameter('is_sim', True)
+        self.is_sim = self.get_parameter('is_sim').value
+        
+        log_type = "sim" if self.is_sim else "real"
+        log_dir = os.path.expanduser(f"~/skypal_ws/logs/{log_type}")
+        os.makedirs(log_dir, exist_ok=True)
+        filename = time.strftime("%Y-%m-%d_%H-%M-%S_Heart_PX4_Pos.log")
+        self.log_file = open(os.path.join(log_dir, filename), 'a')
+        
+        self.log("INFO", f"Skypal Core PX4 Heart Node Initialized ({log_type.upper()} Mode - POSITION). Ready for Commands.")
 
-    def vehicle_status_callback(self, msg):
+    def log(self, level, msg):
+        log_str = f"[{time.strftime('%H:%M:%S.%f')[:-3]}] [{level}] {msg}\n"
+        self.log_file.write(log_str)
+        self.log_file.flush()
+        if level == "INFO": self.get_logger().info(msg)
+        elif level == "WARN": self.get_logger().warning(msg)
+        elif level == "ERROR": self.get_logger().error(msg)
+        
+    def local_pos_callback(self, msg):
+        self.current_x = msg.x
+        self.current_y = msg.y
+        self.current_z = msg.z
+        self.current_yaw = msg.heading
+
+    def status_callback(self, msg):
         self.nav_state = msg.nav_state
         self.arming_state = msg.arming_state
 
-    def attitude_callback(self, msg):
-        q = msg.q
-        self.current_yaw = math.atan2(2.0 * (q[0] * q[3] + q[1] * q[2]), 1.0 - 2.0 * (q[2]*q[2] + q[3]*q[3]))
-
     def heartbeat_callback(self, msg):
         now = self.get_clock().now()
-        stamp_time = rclpy.time.Time.from_msg(msg.stamp)
-        
-        latency = (now - stamp_time).nanoseconds / 1e9
-        
-        if latency > self.max_latency_sec:
-            if not self.failsafe_triggered:
-                self.get_logger().warning(f'High Latency Detected: {latency:.3f}s. Triggering Failsafe Hover!')
-                self.failsafe_triggered = True
-        else:
-            if self.failsafe_triggered:
-                self.get_logger().info(f'Connection restored. Latency: {latency:.3f}s. Resuming normal operations.')
-                self.failsafe_triggered = False
-                
+        # We exclusively update the latest receipt time.
+        # We CANNOT calculate absolute one-way latency via (now - msg.stamp)
+        # over the VPN because the Pi and Laptop clocks are not perfectly NTP synchronized.
+        # This caused false>2.0s latency triggers instantly locking the drone into a failsafe hover.
+        # The `monitor_connection` method correctly handles interval dropouts locally.
         self.last_heartbeat_time = now
 
     def cmd_callback(self, msg):
@@ -81,97 +110,113 @@ class HeartNode(Node):
     def sys_cmd_callback(self, msg):
         command = msg.data
         if command == "arm_offboard":
-            self.get_logger().info("Received Arm+Offboard command from Controller.")
+            self.log("INFO", "Received Arm command. Requesting Offboard Mode and Arming PX4.")
+            # Latch position right exactly when we arm to prevent flyaways
+            self.target_x = self.current_x
+            self.target_y = self.current_y
+            self.target_z = self.current_z
+            self.target_yaw = self.current_yaw
+            self.engage_offboard()
             self.arm()
-            self.engage_offboard_mode()
             self.offboard_engaged = True
         elif command == "land":
-            self.get_logger().info("Received Land command from Controller.")
+            self.log("INFO", "Received Land command. Switching to Auto-Land Native Mode.")
             self.land()
             self.offboard_engaged = False
 
-    def arm(self):
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
-        self.get_logger().info('Arm command sent')
-
-    def disarm(self):
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=0.0)
-        self.get_logger().info('Disarm command sent')
-
-    def engage_offboard_mode(self):
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
-        self.get_logger().info("Switching to offboard mode")
-        
-    def land(self):
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
-        self.get_logger().info("Switching to land mode")
-
-    def publish_vehicle_command(self, command, **params):
+    def send_vehicle_command(self, command, param1=0.0, param2=0.0):
         msg = VehicleCommand()
         msg.command = command
-        msg.param1 = params.get("param1", 0.0)
-        msg.param2 = params.get("param2", 0.0)
-        msg.param3 = params.get("param3", 0.0)
-        msg.param4 = params.get("param4", 0.0)
-        msg.param5 = params.get("param5", 0.0)
-        msg.param6 = params.get("param6", 0.0)
-        msg.param7 = params.get("param7", 0.0)
+        msg.param1 = float(param1)
+        msg.param2 = float(param2)
         msg.target_system = 1
         msg.target_component = 1
         msg.source_system = 1
         msg.source_component = 1
         msg.from_external = True
-        msg.timestamp = int(Clock().now().nanoseconds / 1000)
-        self.vehicle_command_publisher.publish(msg)
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.vehicle_command_pub.publish(msg)
+
+    def arm(self):
+        self.send_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
+        self.log("INFO", "Arm command sent to PX4.")
+
+    def engage_offboard(self):
+        self.send_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
+        self.log("INFO", "Offboard mode command sent.")
+
+    def land(self):
+        self.send_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+        self.log("INFO", "Land command sent.")
 
     def monitor_connection(self):
         now = self.get_clock().now()
         time_since_last_heartbeat = (now - self.last_heartbeat_time).nanoseconds / 1e9
         
-        if time_since_last_heartbeat > self.max_latency_sec and not self.failsafe_triggered:
-             self.get_logger().error(f'Connection Lost! No heartbeat for {time_since_last_heartbeat:.3f}s. Triggering PX4 Failsafe Hover!')
-             self.failsafe_triggered = True
+        if time_since_last_heartbeat > self.max_latency_sec:
+            if not self.failsafe_triggered:
+                 self.log("ERROR", f"Connection Lost! No heartbeat for {time_since_last_heartbeat:.3f}s. Triggering Failsafe Hover!")
+                 self.failsafe_triggered = True
+        else:
+            if self.failsafe_triggered:
+                 self.log("INFO", f"Connection Restored ({time_since_last_heartbeat:.3f}s). Failsafe Disabled.")
+                 self.failsafe_triggered = False
 
     def publish_offboard_heartbeat(self):
-        # Must publish OffboardControlMode continuously at 20Hz to maintain PX4 connection
-        # PX4 REQUIRES this stream to exist BEFORE it will accept the switch to Offboard mode!
+        # 1. Provide OffboardControlMode Signal
         mode_msg = OffboardControlMode()
         mode_msg.position = False
         mode_msg.velocity = True
         mode_msg.acceleration = False
         mode_msg.attitude = False
         mode_msg.body_rate = False
-        mode_msg.timestamp = int(Clock().now().nanoseconds / 1000)
-        self.offboard_control_mode_publisher.publish(mode_msg)
+        mode_msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.offboard_mode_pub.publish(mode_msg)
         
-        # Publish Trajectory Setpoint
-        setpoint_msg = TrajectorySetpoint()
-        setpoint_msg.timestamp = int(Clock().now().nanoseconds / 1000)
+        # 2. Provide TrajectorySetpoint Signal
+        msg = TrajectorySetpoint()
+        msg.position = [float('nan'), float('nan'), float('nan')]
+        msg.yaw = float('nan')
         
-        if self.failsafe_triggered:
-            # Hover in place exactly where the drone is (Zero velocity on all axes)
-            setpoint_msg.velocity = [0.0, 0.0, 0.0]
-            setpoint_msg.yawspeed = 0.0
+        if self.failsafe_triggered or not self.offboard_engaged:
+            # Hover in place exactly where the drone is
+            self.smooth_v_body_x = 0.0
+            self.smooth_v_body_y = 0.0
+            self.smooth_v_down = 0.0
+            self.smooth_v_yaw = 0.0
+            msg.velocity = [0.0, 0.0, 0.0]
+            msg.yawspeed = 0.0
         else:
-            # Body Frame inputs from controller
-            v_forward = self.last_cmd.linear.x
-            v_right = -self.last_cmd.linear.y
-            v_down = -self.last_cmd.linear.z
+            # Body Frame Control Logic:
+            # ROS 2 Twist is FLU (Forward, Left, Up)
+            # PX4 Body is FRD (Forward, Right, Down)
             
-            # Rotate body velocities to Earth (NED) frame based on current yaw
-            v_north = v_forward * math.cos(self.current_yaw) - v_right * math.sin(self.current_yaw)
-            v_east = v_forward * math.sin(self.current_yaw) + v_right * math.cos(self.current_yaw)
+            # AXIS SWAP: Hardware testing revealed a 90-degree physical offset.
+            # Stick Left (+linear.y) goes Left (+v_body_x produced Left)
+            # Stick Forward (+linear.x) goes Forward (+v_body_y produced Forward)
+            target_v_body_x = self.last_cmd.linear.y    
+            target_v_body_y = self.last_cmd.linear.x   
             
-            setpoint_msg.velocity = [v_north, v_east, v_down]
-            setpoint_msg.yawspeed = -self.last_cmd.angular.z  # FLU CCW to NED CW yaw
+            target_v_down = -self.last_cmd.linear.z     # Stick Up      -> Body -Z (Up is negative Down)
+            target_v_yaw = -self.last_cmd.angular.z     # CCW spin mapped to PX4 yawspeed
             
-        # Set Position array to NaN so the FMU ignores it and acts solely on velocity
-        setpoint_msg.position = [float('nan'), float('nan'), float('nan')]
-        setpoint_msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        setpoint_msg.jerk = [float('nan'), float('nan'), float('nan')]
-        setpoint_msg.yaw = float('nan')
-        
-        self.trajectory_setpoint_publisher.publish(setpoint_msg)
+            # Apply Exponential Moving Average (EMA) to smooth out network jitter
+            self.smooth_v_body_x += self.alpha_v * (target_v_body_x - self.smooth_v_body_x)
+            self.smooth_v_body_y += self.alpha_v * (target_v_body_y - self.smooth_v_body_y)
+            self.smooth_v_down += self.alpha_v * (target_v_down - self.smooth_v_down)
+            self.smooth_v_yaw += self.alpha_v * (target_v_yaw - self.smooth_v_yaw)
+            
+            # Apply 2D Trigonometric Rotation Matrix to convert Body FRD to Geographic Local NED
+            yaw = self.current_yaw
+            v_north = self.smooth_v_body_x * math.cos(yaw) - self.smooth_v_body_y * math.sin(yaw)
+            v_east = self.smooth_v_body_x * math.sin(yaw) + self.smooth_v_body_y * math.cos(yaw)
+            
+            msg.velocity = [v_north, v_east, self.smooth_v_down]
+            msg.yawspeed = self.smooth_v_yaw
+
+
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.trajectory_pub.publish(msg)
 
 def main(args=None):
     rclpy.init(args=args)
