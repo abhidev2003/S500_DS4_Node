@@ -28,7 +28,9 @@ setup(
     entry_points={
         'console_scripts': [
             'heart_node = skypal_core.heart_node:main',
-            'mission_commander = skypal_core.mission_commander:main'
+            'mission_commander = skypal_core.mission_commander:main',
+            'yolo_obstacle_detector = skypal_core.yolo_obstacle_detector:main',
+            'sonar_multiplex = skypal_core.sonar_multiplex:main'
         ],
     },
 )

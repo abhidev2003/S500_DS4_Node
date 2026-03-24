@@ -15,7 +15,10 @@ COMMAND_TEMPLATES = [
     ("2. PX4 Gazebo", "bash -c 'export PX4_GZ_WORLD={gz_world} && cd ~/PX4-Autopilot && __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia make px4_sitl gz_x500_custom'"),
     ("3. Joy Node", "bash -c 'source /opt/ros/humble/setup.bash && ros2 run joy joy_node'"),
     ("4. Controller Node", "bash -c 'source ~/skypal_ws/install/setup.bash && ros2 run skypal_controller controller_node --ros-args -p is_sim:=True'"),
-    ("5. Heart Node (PX4)", "bash -c 'source ~/skypal_ws/install/setup.bash && ros2 run skypal_core heart_node --ros-args -p is_sim:=True'")
+    ("5. Heart Node (PX4)", "bash -c 'source ~/skypal_ws/install/setup.bash && ros2 run skypal_core heart_node --ros-args -p is_sim:=True'"),
+    ("6. LiDAR GZ-Bridge", "bash -c 'source /opt/ros/humble/setup.bash && ros2 run ros_gz_bridge parameter_bridge /world/{gz_world}/model/x500_custom_0/link/link/sensor/lidar_2d_v2/scan@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan'"),
+    ("7. LiDAR Core Logic", "bash -c 'source /opt/ros/humble/setup.bash && source ~/skypal_ws/install/setup.bash && python3 ~/skypal_ws/src/skypal_core/skypal_core/lidar_tester.py'"),
+    ("8. MAVProxy (TELEM 1)", "echo 'MAVProxy telemetry not required for purely local SIM'")
 ]
 
 class ProcessTab(ttk.Frame):
@@ -99,6 +102,9 @@ class ProcessTab(ttk.Frame):
                 if "XRCE-DDS Agent" in self.name:
                     # Point the Agent on the Pi BACK to the PC's Tailscale IP
                     cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@skyberry \"bash -c 'source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=100.122.20.128:11811 && MicroXRCEAgent serial -D /dev/ttyAMA0 -b 921600'\""
+                elif "MAVProxy" in self.name:
+                    # Point MAVProxy on the Pi to host a TCP Server on 0.0.0.0
+                    cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@skyberry \"bash -c 'mavproxy.py --master=/dev/ttyAMA1 --baudrate=921600 --out tcpin:0.0.0.0:5760'\""
                 elif "Controller Node" in self.name or "Heart Node" in self.name:
                     cmd_template = cmd_template.replace("is_sim:=True", "is_sim:=False")
                     
@@ -230,6 +236,10 @@ class PX4SkypalLauncher(tk.Tk):
         self.ping_status_var = tk.StringVar(value="Status: Unknown")
         ttk.Label(ping_frame, textvariable=self.ping_status_var, font=('Helvetica', 10, 'bold')).pack(side='left', padx=10)
         
+        ttk.Button(ping_frame, text="Ping HW", command=self.ping_hardware).pack(side='left', padx=5)
+        self.hw_status_var = tk.StringVar(value="HW: Unknown")
+        ttk.Label(ping_frame, textvariable=self.hw_status_var, font=('Helvetica', 10, 'bold')).pack(side='left', padx=10)
+        
         # Network Manager Frame
         net_frame = ttk.LabelFrame(self, text="Skyberry Network Manager")
         net_frame.pack(fill='x', padx=10, pady=5)
@@ -275,6 +285,37 @@ class PX4SkypalLauncher(tk.Tk):
                 self.after(0, lambda err=e: self.ping_status_var.set(f"Status: ERROR ({err})"))
                 
         threading.Thread(target=run_ping, daemon=True).start()
+
+    def ping_hardware(self):
+        self.hw_status_var.set("HW: Pinging...")
+        
+        def run_hw_ping():
+            ip = self.vpn_ip_var.get()
+            # Fetch CPU idle % and Temp from RPi
+            cmd = f"sshpass -p 'skypal1234' ssh -o StrictHostKeyChecking=no skypal@{ip} \"cat /sys/class/thermal/thermal_zone0/temp && top -bn1 | grep 'Cpu(s)'\""
+            try:
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    lines = result.stdout.strip().split('\n')
+                    if len(lines) >= 2:
+                        temp = float(lines[0]) / 1000.0
+                        cpu_str = lines[1]
+                        import re
+                        id_match = re.search(r'([0-9.]+)\s+id', cpu_str)
+                        if id_match:
+                            cpu_usage = 100.0 - float(id_match.group(1))
+                            status = f"CPU: {cpu_usage:.1f}% | Temp: {temp:.1f}°C"
+                        else:
+                            status = f"CPU: ERR | Temp: {temp:.1f}°C"
+                        self.after(0, lambda: self.hw_status_var.set(status))
+                    else:
+                        self.after(0, lambda: self.hw_status_var.set("HW: Parsing Error"))
+                else:
+                    self.after(0, lambda: self.hw_status_var.set("HW: OFFLINE"))
+            except Exception:
+                self.after(0, lambda: self.hw_status_var.set("HW: ERROR"))
+                
+        threading.Thread(target=run_hw_ping, daemon=True).start()
         
     def verify_wifi(self):
         self.active_wifi_var.set("Querying...")

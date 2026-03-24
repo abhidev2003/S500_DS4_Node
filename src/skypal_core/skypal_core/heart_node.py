@@ -5,7 +5,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDur
 
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Header, String
-from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleLocalPosition
+from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleLocalPosition, VehicleAttitude
 import math
 import os
 import time
@@ -45,7 +45,7 @@ class HeartNode(Node):
         self.alpha_v = 0.4 # EMA Smoothing Factor (0.0=Static to 1.0=Instant)
         
         self.local_pos_sub = self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.local_pos_callback, qos_profile)
-        
+        self.attitude_sub = self.create_subscription(VehicleAttitude, '/fmu/out/vehicle_attitude', self.attitude_callback, qos_profile)
         # Publishers to PX4 (XRCE-DDS)
         self.offboard_mode_pub = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
         self.trajectory_pub = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
@@ -89,7 +89,15 @@ class HeartNode(Node):
         self.current_x = msg.x
         self.current_y = msg.y
         self.current_z = msg.z
-        self.current_yaw = msg.heading
+        # Removed self.current_yaw = msg.heading (unreliable in SITL)
+
+    def attitude_callback(self, msg):
+        # Extract Euler yaw from PX4 quaternion (q = [w, x, y, z])
+        q0 = msg.q[0]
+        q1 = msg.q[1]
+        q2 = msg.q[2]
+        q3 = msg.q[3]
+        self.current_yaw = math.atan2(2.0 * (q0 * q3 + q1 * q2), 1.0 - 2.0 * (q2 * q2 + q3 * q3))
 
     def status_callback(self, msg):
         self.nav_state = msg.nav_state
@@ -191,11 +199,17 @@ class HeartNode(Node):
             # ROS 2 Twist is FLU (Forward, Left, Up)
             # PX4 Body is FRD (Forward, Right, Down)
             
-            # AXIS SWAP: Hardware testing revealed a 90-degree physical offset.
-            # Stick Left (+linear.y) goes Left (+v_body_x produced Left)
-            # Stick Forward (+linear.x) goes Forward (+v_body_y produced Forward)
-            target_v_body_x = self.last_cmd.linear.y    
-            target_v_body_y = self.last_cmd.linear.x   
+            if self.is_sim:
+                # Standard Mapping: +linear.x is Forward, +linear.y is Left
+                # PX4 Body FRD: +X is Forward, +Y is Right
+                target_v_body_x = self.last_cmd.linear.x    
+                target_v_body_y = -self.last_cmd.linear.y   
+            else:
+                # AXIS SWAP: Hardware testing revealed a 90-degree physical offset.
+                # Stick Left (+linear.y) goes Left (+v_body_x produced Left)
+                # Stick Forward (+linear.x) goes Forward (+v_body_y produced Forward)
+                target_v_body_x = self.last_cmd.linear.y    
+                target_v_body_y = self.last_cmd.linear.x   
             
             target_v_down = -self.last_cmd.linear.z     # Stick Up      -> Body -Z (Up is negative Down)
             target_v_yaw = -self.last_cmd.angular.z     # CCW spin mapped to PX4 yawspeed
