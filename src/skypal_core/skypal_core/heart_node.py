@@ -199,17 +199,10 @@ class HeartNode(Node):
             # ROS 2 Twist is FLU (Forward, Left, Up)
             # PX4 Body is FRD (Forward, Right, Down)
             
-            if self.is_sim:
-                # Standard Mapping: +linear.x is Forward, +linear.y is Left
-                # PX4 Body FRD: +X is Forward, +Y is Right
-                target_v_body_x = self.last_cmd.linear.x    
-                target_v_body_y = -self.last_cmd.linear.y   
-            else:
-                # AXIS SWAP: Hardware testing revealed a 90-degree physical offset.
-                # Stick Left (+linear.y) goes Left (+v_body_x produced Left)
-                # Stick Forward (+linear.x) goes Forward (+v_body_y produced Forward)
-                target_v_body_x = self.last_cmd.linear.y    
-                target_v_body_y = self.last_cmd.linear.x   
+            # Standard Mapping: +linear.x is Forward, +linear.y is Left
+            # PX4 Body FRD: +X is Forward, +Y is Right
+            target_v_body_x = self.last_cmd.linear.x    
+            target_v_body_y = -self.last_cmd.linear.y   
             
             target_v_down = -self.last_cmd.linear.z     # Stick Up      -> Body -Z (Up is negative Down)
             target_v_yaw = -self.last_cmd.angular.z     # CCW spin mapped to PX4 yawspeed
