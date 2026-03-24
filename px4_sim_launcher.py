@@ -88,6 +88,10 @@ class ProcessTab(ttk.Frame):
         if self.process is None:
             cmd_template = self.cmd_template
             mode = self.app.mode_var.get()
+            vpn_ip = self.app.vpn_ip_var.get()
+            local_ip = subprocess.getoutput("tailscale ip -4 2>/dev/null").strip()
+            if not local_ip: local_ip = "127.0.0.1"
+            local_ip = local_ip.split('\n')[0]
             
             # --- Dynamic Command Routing based on Mode ---
             if "0. Discovery Server" in self.name:
@@ -101,10 +105,10 @@ class ProcessTab(ttk.Frame):
                 # In Real Flight, the Micro XRCE-DDS Agent must run on the Pi to talk to the physical Pixhawk
                 if "XRCE-DDS Agent" in self.name:
                     # Point the Agent on the Pi BACK to the PC's Tailscale IP
-                    cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@skyberry \"bash -c 'source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=100.122.20.128:11811 && MicroXRCEAgent serial -D /dev/ttyAMA0 -b 921600'\""
+                    cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@{vpn_ip} \"bash -c 'source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER={local_ip}:11811 && MicroXRCEAgent serial -D /dev/ttyAMA0 -b 921600'\""
                 elif "MAVProxy" in self.name:
                     # Point MAVProxy on the Pi to host a TCP Server on 0.0.0.0
-                    cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@skyberry \"bash -c 'mavproxy.py --master=/dev/ttyAMA1 --baudrate=921600 --out tcpin:0.0.0.0:5760'\""
+                    cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@{vpn_ip} \"bash -c 'mavproxy.py --master=/dev/ttyAMA1 --baudrate=921600 --out tcpin:0.0.0.0:5760'\""
                 elif "Controller Node" in self.name or "Heart Node" in self.name:
                     cmd_template = cmd_template.replace("is_sim:=True", "is_sim:=False")
                     
@@ -113,7 +117,7 @@ class ProcessTab(ttk.Frame):
                 if "Heart Node" in self.name:
                     is_sim_flag = "False" if mode == "REAL_FLIGHT" else "True"
                     # Point the Heart Node on the Pi BACK to the PC's Tailscale IP
-                    cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@skyberry \"bash -c 'source /opt/ros/humble/setup.bash && source ~/skypal_ws/install/setup.bash && export ROS_DISCOVERY_SERVER=100.122.20.128:11811 && ros2 run skypal_core heart_node --ros-args -p is_sim:={is_sim_flag}'\""
+                    cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@{vpn_ip} \"bash -c 'source /opt/ros/humble/setup.bash && source ~/skypal_ws/install/setup.bash && export ROS_DISCOVERY_SERVER={local_ip}:11811 && ros2 run skypal_core heart_node --ros-args -p is_sim:={is_sim_flag}'\""
                 
                 # The local PC nodes must point to the local 0.0.0.0 server so they can see EACH OTHER
                 elif "Joy Node" in self.name or "Controller Node" in self.name or ("XRCE-DDS Agent" in self.name and mode == "RPI_SITL"):
