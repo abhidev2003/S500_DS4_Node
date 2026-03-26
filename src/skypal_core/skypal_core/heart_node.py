@@ -234,7 +234,7 @@ class HeartNode(Node):
     def publish_offboard_heartbeat(self):
         # 1. Provide OffboardControlMode Signal
         mode_msg = OffboardControlMode()
-        mode_msg.position = False
+        mode_msg.position = True
         mode_msg.velocity = True
         mode_msg.acceleration = False
         mode_msg.attitude = False
