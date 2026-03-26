@@ -79,9 +79,11 @@ class PathTrackerNode(Node):
             return
             
         if self.target_index < 0:
+            # Reached Home Origin. Execute a heavily cushioned landing.
+            # Positive Z in NED points DOWN. 0.3 m/s is a buttery soft descent.
             setpoint = TrajectorySetpoint()
             setpoint.position = [float('nan'), float('nan'), float('nan')]
-            setpoint.velocity = [0.0, 0.0, 0.0]
+            setpoint.velocity = [0.0, 0.0, 0.3]
             setpoint.yawspeed = 0.0
             setpoint.timestamp = int(self.get_clock().now().nanoseconds / 1000)
             self.traj_pub.publish(setpoint)
