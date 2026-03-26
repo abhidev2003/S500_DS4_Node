@@ -30,19 +30,22 @@ class SkyPalMissionCommander(Node):
         self.land_sub = self.create_subscription(VehicleLandDetected, '/fmu/out/vehicle_land_detected', self.land_cb, qos_profile_sensor_data)
         
         self.local_mission_sub = self.create_subscription(String, '/skypal/local_mission', self.local_mission_cb, 10)
+        self.proceed_sub = self.create_subscription(String, '/skypal/local_mission_proceed', self.proceed_cb, 10)
+        self.status_pub = self.create_publisher(String, '/skypal/mission_status', 10)
 
         self.get_logger().info("🛡️ Drone Autonomy Core offline and eagerly awaiting UI map dispatch.")
 
-        self.state = 'IDLE' # IDLE -> PIVOT -> GLIDE -> LANDING -> AWAITING_TAKEOFF -> (IDLE)
+        self.state = 'IDLE' # IDLE -> PIVOT -> GLIDE -> LANDING -> AWAITING_APPROVAL -> (IDLE)
         self.waypoints = []
         self.current_wp_index = 0
-        self.landing_timestamp = 0.0
         self.is_offboard = False
 
         self.home_lat = None
         self.home_lon = None
+        self.home_alt = None
         self.current_lat = 0.0
         self.current_lon = 0.0
+        self.current_alt = 0.0
         self.current_heading = 0.0
         
         self.lidar_distance = float('inf')
@@ -70,6 +73,12 @@ class SkyPalMissionCommander(Node):
                 (self.home_lat, self.home_lon) # Wp 2: Returning to the initial Origin base
             ]
             self.current_wp_index = 0
+            self.advance_waypoint()
+
+    def proceed_cb(self, msg):
+        if msg.data == "PROCEED" and self.state == 'AWAITING_APPROVAL':
+            self.get_logger().info("✅ Manual UI Proceed Signal Authorized. Launching to next waypoint.")
+            self.current_wp_index += 1
             self.advance_waypoint()
 
     def advance_waypoint(self):
@@ -103,11 +112,13 @@ class SkyPalMissionCommander(Node):
     def global_pos_cb(self, msg):
         self.current_lat = msg.lat
         self.current_lon = msg.lon
+        self.current_alt = msg.alt
         
         if self.home_lat is None and msg.lat != 0.0:
             self.home_lat = msg.lat
             self.home_lon = msg.lon
-            self.get_logger().info(f"📍 Home Base Station physically Locked: {self.home_lat}, {self.home_lon}")
+            self.home_alt = msg.alt
+            self.get_logger().info(f"📍 Home Base Station physically Locked: {self.home_lat}, {self.home_lon} at {self.home_alt:.2f}m")
 
     def attitude_cb(self, msg):
         # Decode Quaternion mathematically to extract Yaw (Heading)
@@ -132,9 +143,13 @@ class SkyPalMissionCommander(Node):
         if not self.is_offboard:
             return
 
-        current_time = self.get_clock().now().nanoseconds / 1e9
+        # Blind the LiDAR collision protocol specifically when launching from or touching the ground
+        is_near_ground = False
+        if self.home_alt is not None:
+            if abs(self.current_alt - self.home_alt) < 4.0:
+                is_near_ground = True
 
-        if math.isnan(self.lidar_distance) or self.lidar_distance < 3.0:
+        if not is_near_ground and (math.isnan(self.lidar_distance) or self.lidar_distance < 3.0):
             self.get_logger().warn(f"EMERGENCY: Lidar Obstacle tripped at {self.lidar_distance}m! Loitering mode engaged.")
             self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LOITER)
             if self.state == 'GLIDE':
@@ -186,15 +201,23 @@ class SkyPalMissionCommander(Node):
             # Instantly kill propellers upon authentic pavement contact to prevent 0.2m freefall
             if self.is_grounded:
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0)
-                self.state = 'AWAITING_TAKEOFF'
-                self.landing_timestamp = current_time
-                self.get_logger().info("Touchdown verified natively by PX4 Accelerometer! Disarmed. Delaying 10s for package transfer simulation.")
+                self.state = 'AWAITING_APPROVAL'
+                
+                # Push GUI Checkpoint Notification
+                status_msg = String()
+                if self.current_wp_index == 0:
+                    status_msg.data = "ARRIVED_SENDER"
+                elif self.current_wp_index == 1:
+                    status_msg.data = "ARRIVED_RECEIVER"
+                else:
+                    status_msg.data = "ARRIVED_HOME"
+                self.status_pub.publish(status_msg)
+                
+                self.get_logger().info(f"Touchdown verified natively by PX4 Accelerometer! Disarmed. Active Status: {status_msg.data}")
             
-        elif self.state == 'AWAITING_TAKEOFF':
-            if current_time - self.landing_timestamp > 10.0:
-                self.get_logger().info("Timeout threshold hit. Re-engaging next logic cycle.")
-                self.current_wp_index += 1
-                self.advance_waypoint()
+        elif self.state == 'AWAITING_APPROVAL':
+            # Halt Offboard trajectory fields entirely. PX4 rests cleanly on the ground ignoring empty arrays internally.
+            pass
 
         self.setpoint_pub.publish(msg)
 

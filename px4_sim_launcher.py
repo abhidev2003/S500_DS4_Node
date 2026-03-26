@@ -228,6 +228,13 @@ class MissionControlTab(ttk.Frame):
         
         self.btn_initiate = ttk.Button(control_frame, text="🚀 Initiate Mission", state="disabled", command=self.initiate_mission)
         self.btn_initiate.pack(side='left', padx=10)
+        
+        self.latch_state = False
+        self.btn_latch = ttk.Button(control_frame, text="🔓 Latch Open/Close", state="disabled", command=self.toggle_latch)
+        self.btn_latch.pack(side='left', padx=10)
+
+        self.btn_proceed = ttk.Button(control_frame, text="✅ Send Next", state="disabled", command=self.proceed_mission)
+        self.btn_proceed.pack(side='left', padx=10)
 
         # Map Interaction Handlers
         self.send_marker = None
@@ -238,6 +245,66 @@ class MissionControlTab(ttk.Frame):
         self.map_widget.add_right_click_menu_command(label="Set Receive Location", command=self.set_receive_location, pass_coords=True)
         
         self.stream_ros_location()
+        self.stream_mission_status()
+
+    def stream_mission_status(self):
+        def _tail_status():
+            cmd = "source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && PYTHONUNBUFFERED=1 ros2 topic echo /skypal/mission_status std_msgs/msg/String"
+            proc = subprocess.Popen(cmd, shell=True, executable='/bin/bash', stdout=subprocess.PIPE, text=True, preexec_fn=os.setsid)
+            try:
+                for line in iter(proc.stdout.readline, ''):
+                    line = line.strip()
+                    if "data:" in line:
+                        status = line.split("data:")[1].strip().strip("'").strip('"')
+                        if status == "ARRIVED_SENDER":
+                            self.app.after(0, lambda: self.handle_arrival("Sender"))
+                        elif status == "ARRIVED_RECEIVER":
+                            self.app.after(0, lambda: self.handle_arrival("Receiver"))
+                        elif status == "ARRIVED_HOME":
+                            self.app.after(0, lambda: self.handle_arrival("Home"))
+            except Exception:
+                pass
+        self.status_thread = threading.Thread(target=_tail_status, daemon=True)
+        self.status_thread.start()
+
+    def handle_arrival(self, location):
+        from tkinter import messagebox
+        messagebox.showinfo("Mission Status", f"The Drone has securely landed and DISARMED at the {location}!")
+        if location in ["Sender", "Receiver"]:
+            self.btn_latch.configure(state="normal")
+            
+            if location == "Sender":
+                self.btn_proceed.configure(text="✅ Send to Receiver")
+            elif location == "Receiver":
+                self.btn_proceed.configure(text="✅ Return to Base")
+                
+            self.btn_proceed.configure(state="disabled")
+            self.latch_state = False 
+        else:
+            self.btn_latch.configure(state="disabled")
+            self.btn_proceed.configure(state="disabled")
+
+    def toggle_latch(self):
+        self.latch_state = not self.latch_state
+        state_str = "OPENED" if self.latch_state else "CLOSED"
+        
+        cmd = f"source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/latch_control std_msgs/msg/String '{{data: \"{state_str}\"}}'"
+        subprocess.Popen(cmd, shell=True, executable='/bin/bash')
+        
+        if self.latch_state:
+            self.btn_proceed.configure(state="normal")
+
+    def proceed_mission(self):
+        if self.latch_state:
+            from tkinter import messagebox
+            messagebox.showwarning("Safety Protocol", "You must CLOSE the latch to secure the package before dispatching!")
+            return
+            
+        self.btn_proceed.configure(state="disabled")
+        self.btn_latch.configure(state="disabled")
+        
+        cmd = "source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/local_mission_proceed std_msgs/msg/String '{data: \"PROCEED\"}'"
+        subprocess.Popen(cmd, shell=True, executable='/bin/bash')
 
     def update_map_gui(self, lat, lon):
         if hasattr(self, 'drone_marker'):
