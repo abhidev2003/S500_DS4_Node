@@ -101,7 +101,7 @@ class SkyPalMissionCommander(Node):
         ex, ey = self.wgs84_to_ned(end_wgs[0], end_wgs[1])
         
         dist = math.sqrt((ex-sx)**2 + (ey-sy)**2)
-        num_points = int(dist / interval_m)
+        num_points = max(1, int(dist / interval_m))
         
         points = []
         for i in range(1, num_points):
@@ -200,7 +200,7 @@ class SkyPalMissionCommander(Node):
         d_lon = target_lon_rad - home_lon_rad
         
         x = r_earth * d_lat
-        y = r_earth * math.cos(lat_rad) * d_lon
+        y = r_earth * math.cos(home_lat_rad) * d_lon
         return x, y
 
     def offboard_heartbeat(self):
