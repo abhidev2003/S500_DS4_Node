@@ -64,19 +64,52 @@ class SkyPalMissionCommander(Node):
         if self.state != 'IDLE':
             self.get_logger().warn("Mission physically in progress! Ignoring local dispatch until current queue clears.")
             return
+    def mission_receive_cb(self, msg):
+        coords = msg.data.split(',')
+        if len(coords) == 4:
+            self.get_logger().info(f"Interlocked GUI Waypoints: {coords} -> Deploying Route Calculator!")
             
-        parts = [float(x) for x in msg.data.split(',')]
-        if len(parts) == 4 and self.home_lat is not None:
-            self.get_logger().info("📥 Local Multi-Waypoint Mission Intercepted via GUI Map!")
-            send_lat, send_lon, recv_lat, recv_lon = parts
+            sender_wgs = (float(coords[0]), float(coords[1]))
+            receiver_wgs = (float(coords[2]), float(coords[3]))
+            home_wgs = (self.home_lat, self.home_lon)
             
-            self.waypoints = [
-                (send_lat, send_lon),       # Wp 0: Send Location
-                (recv_lat, recv_lon),       # Wp 1: Receive Location
-                (self.home_lat, self.home_lon) # Wp 2: Returning to the initial Origin base
-            ]
+            self.waypoints = []
+            
+            # Segment 1: Home to Sender
+            seg1 = self.generate_segment(home_wgs, sender_wgs, 10.0)
+            self.waypoints.extend(seg1)
+            sx, sy = self.wgs84_to_ned(sender_wgs[0], sender_wgs[1])
+            self.waypoints.append({'pos': (sx, sy), 'action': 'LAND', 'tag': 'SENDER'})
+            
+            # Segment 2: Sender to Receiver
+            seg2 = self.generate_segment(sender_wgs, receiver_wgs, 10.0)
+            self.waypoints.extend(seg2)
+            rx, ry = self.wgs84_to_ned(receiver_wgs[0], receiver_wgs[1])
+            self.waypoints.append({'pos': (rx, ry), 'action': 'LAND', 'tag': 'RECEIVER'})
+            
+            # Segment 3: Receiver to Home
+            seg3 = self.generate_segment(receiver_wgs, home_wgs, 10.0)
+            self.waypoints.extend(seg3)
+            hx, hy = self.wgs84_to_ned(home_wgs[0], home_wgs[1])
+            self.waypoints.append({'pos': (hx, hy), 'action': 'LAND', 'tag': 'HOME'})
+            
             self.current_wp_index = 0
             self.advance_waypoint()
+
+    def generate_segment(self, start_wgs, end_wgs, interval_m):
+        sx, sy = self.wgs84_to_ned(start_wgs[0], start_wgs[1])
+        ex, ey = self.wgs84_to_ned(end_wgs[0], end_wgs[1])
+        
+        dist = math.sqrt((ex-sx)**2 + (ey-sy)**2)
+        num_points = int(dist / interval_m)
+        
+        points = []
+        for i in range(1, num_points):
+            frac = i / float(num_points)
+            ix = sx + frac * (ex - sx)
+            iy = sy + frac * (ey - sy)
+            points.append({'pos': (ix, iy), 'action': 'FLY', 'tag': f'ROUTE_BLOCK'})
+        return points
 
     def proceed_cb(self, msg):
         if msg.data == "PROCEED" and self.state == 'AWAITING_APPROVAL':
@@ -90,14 +123,22 @@ class SkyPalMissionCommander(Node):
             
         if self.current_wp_index >= len(self.waypoints):
             self.state = 'IDLE'
-            self.get_logger().info("🎉 Complete Mission logic loop finished!")
+            self.get_logger().info("🎉 Complete Mission/Route mapping finished!")
             return
             
-        target_lat, target_lon = self.waypoints[self.current_wp_index]
-        self.target_ned_x, self.target_ned_y = self.wgs84_to_ned(target_lat, target_lon)
-        self.get_logger().info(f"Target Acquired (Waypoint {self.current_wp_index}): NED X={self.target_ned_x:.2f}m, Y={self.target_ned_y:.2f}m")
+        wp = self.waypoints[self.current_wp_index]
+        self.target_ned_x = float(wp['pos'][0])
+        self.target_ned_y = float(wp['pos'][1])
+        self.current_wp_action = str(wp['action'])
+        self.current_wp_tag = str(wp['tag'])
         
-        # Fire signal to multiplexer to unblock channel
+        if self.state == 'IDLE' or self.state == 'AWAITING_APPROVAL':
+            # Only full Pivot on major launches to orient cleanly before accelerating
+            self.get_logger().info(f"Targeting explicit route marker: {self.current_wp_tag}")
+            self.state = 'PIVOT'
+        else:
+            # Intermediate checkpoints flow instantaneously without pausing
+            self.state = 'GLIDE'      # Fire signal to multiplexer to unblock channel
         sys_msg = String()
         sys_msg.data = "auto_mode_yield"
         self.sys_pub.publish(sys_msg)
@@ -145,14 +186,18 @@ class SkyPalMissionCommander(Node):
         self.current_heading = math.atan2(2.0 * (q[0] * q[3] + q[1] * q[2]), 1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]))
 
     def wgs84_to_ned(self, target_lat, target_lon):
-        r_earth = 6378137.0
-        lat_rad = math.radians(self.home_lat)
-        lon_rad = math.radians(self.home_lon)
+        if self.home_lat is None or self.home_lon is None:
+            return 0.0, 0.0
+            
+        r_earth = 6371000.0  # Radius of earth in meters
+        
+        home_lat_rad = math.radians(float(self.home_lat))
+        home_lon_rad = math.radians(float(self.home_lon))
         target_lat_rad = math.radians(target_lat)
         target_lon_rad = math.radians(target_lon)
         
-        d_lat = target_lat_rad - lat_rad
-        d_lon = target_lon_rad - lon_rad
+        d_lat = target_lat_rad - home_lat_rad
+        d_lon = target_lon_rad - home_lon_rad
         
         x = r_earth * d_lat
         y = r_earth * math.cos(lat_rad) * d_lon
@@ -215,15 +260,21 @@ class SkyPalMissionCommander(Node):
                 self.get_logger().info("Altitude Reached! Engaging 3.0m/s GLIDE thrust.")
 
         elif self.state == 'GLIDE':
-            if distance_to_target < 0.5:
-                # Only dispatch the DROP cycle when the drone has entirely exhausted its X/Y momentum organically!
-                self.state = 'LANDING'
-                self.get_logger().info(f"Waypoint Reached! Dispatching Auto-Landing block {self.current_wp_index}...")
-            elif abs(yaw_error) > 0.5 and distance_to_target > 2.0: 
-                self.state = 'PIVOT'
+            if distance_to_target < 1.0:
+                if self.current_wp_action == 'LAND':
+                    self.state = 'LANDING'
+                    self.get_logger().info(f"Terminus Reached! Dispatching Parabolic Auto-Landing {self.current_wp_tag}...")
+                else:
+                    self.get_logger().info("Crossed discrete routing block, mapping next sequence natively...")
+                    self.current_wp_index += 1
+                    self.advance_waypoint()
             else:
-                # Custom Velocity Route Braking: Slow down linearly within 5 meters of the destination!
-                fly_speed = min(3.0, distance_to_target * 0.6) if distance_to_target > 0.1 else 0.0
+                # Fly-through waypoints trace flawlessly at full 3.0m/s speeds. Landing nodes organic cushion.
+                if self.current_wp_action == 'LAND':
+                    fly_speed = min(3.0, distance_to_target * 0.6) if distance_to_target > 0.1 else 0.0
+                else:
+                    fly_speed = 3.0
+                    
                 vx = (dx / distance_to_target) * fly_speed if distance_to_target > 0.1 else 0.0
                 vy = (dy / distance_to_target) * fly_speed if distance_to_target > 0.1 else 0.0
                 
@@ -233,7 +284,11 @@ class SkyPalMissionCommander(Node):
                 
                 msg.position = [float('nan'), float('nan'), float('nan')]
                 msg.velocity = [vx, vy, vz]
-                msg.yaw = target_yaw
+                
+                if distance_to_target > 2.0:
+                    msg.yaw = target_yaw
+                else:
+                    msg.yaw = self.current_heading
 
         elif self.state == 'LANDING':
             # Target is already enveloped within 0.5m variance. Arrest all horizontal P-loops instantly to kill oscillations.
@@ -262,12 +317,7 @@ class SkyPalMissionCommander(Node):
                 
                 # Push GUI Checkpoint Notification
                 status_msg = String()
-                if self.current_wp_index == 0:
-                    status_msg.data = "ARRIVED_SENDER"
-                elif self.current_wp_index == 1:
-                    status_msg.data = "ARRIVED_RECEIVER"
-                else:
-                    status_msg.data = "ARRIVED_HOME"
+                status_msg.data = self.current_wp_tag
                 self.status_pub.publish(status_msg)
                 
                 self.get_logger().info(f"Touchdown verified mathematically via rolling altimeter buffer! Disarmed. Active Status: {status_msg.data}")
