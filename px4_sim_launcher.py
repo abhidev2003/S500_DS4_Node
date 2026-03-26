@@ -18,7 +18,9 @@ COMMAND_TEMPLATES = [
     ("5. Heart Node (PX4)", "bash -c 'source ~/skypal_ws/install/setup.bash && ros2 run skypal_core heart_node --ros-args -p is_sim:=True'"),
     ("6. LiDAR GZ-Bridge", "bash -c 'source /opt/ros/humble/setup.bash && ros2 run ros_gz_bridge parameter_bridge /world/{gz_world}/model/x500_custom_0/link/link/sensor/lidar_2d_v2/scan@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan'"),
     ("7. LiDAR Core Logic", "bash -c 'source /opt/ros/humble/setup.bash && source ~/skypal_ws/install/setup.bash && python3 ~/skypal_ws/src/skypal_core/skypal_core/lidar_tester.py'"),
-    ("8. MAVProxy (TELEM 1)", "echo 'MAVProxy telemetry not required for purely local SIM'")
+    ("8. MAVProxy (TELEM 1)", "echo 'MAVProxy telemetry not required for purely local SIM'"),
+    ("9. Mission Commander", "bash -c 'source ~/skypal_ws/install/setup.bash && ros2 run skypal_core mission_commander'"),
+    ("10. HITL QR Scanner", "bash -c 'source ~/skypal_ws/install/setup.bash && ros2 run skypal_core qr_scanner_node'")
 ]
 
 class ProcessTab(ttk.Frame):
@@ -116,15 +118,25 @@ class ProcessTab(ttk.Frame):
                 # In both Remote modes, the Heart Node runs on the Pi to simulate/execute over the network
                 if "Heart Node" in self.name:
                     is_sim_flag = "False" if mode == "REAL_FLIGHT" else "True"
+                    record_flag = "True" if self.app.record_video_var.get() else "False"
                     # Point the Heart Node on the Pi BACK to the PC's Tailscale IP
-                    cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@{vpn_ip} \"bash -c 'source /opt/ros/humble/setup.bash && source ~/skypal_ws/install/setup.bash && export ROS_DISCOVERY_SERVER={local_ip}:11811 && ros2 run skypal_core heart_node --ros-args -p is_sim:={is_sim_flag}'\""
+                    cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@{vpn_ip} \"bash -c 'source /opt/ros/humble/setup.bash && source ~/skypal_ws/install/setup.bash && export ROS_DISCOVERY_SERVER={local_ip}:11811 && ros2 run skypal_core heart_node --ros-args -p is_sim:={is_sim_flag} -p record_video:={record_flag}'\""
                 
+                # The Physical Camera is on the drone, so the QR Scanner must run on the Pi
+                elif "HITL QR Scanner" in self.name:
+                    cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@{vpn_ip} \"bash -c 'source /opt/ros/humble/setup.bash && source ~/skypal_ws/install/setup.bash && export ROS_DISCOVERY_SERVER={local_ip}:11811 && ros2 run skypal_core qr_scanner_node'\""
+
                 # The local PC nodes must point to the local 0.0.0.0 server so they can see EACH OTHER
-                elif "Joy Node" in self.name or "Controller Node" in self.name or ("XRCE-DDS Agent" in self.name and mode == "RPI_SITL"):
+                elif "Joy Node" in self.name or "Controller Node" in self.name or ("XRCE-DDS Agent" in self.name and mode == "RPI_SITL") or "Mission Commander" in self.name:
                     cmd_template = "export ROS_DISCOVERY_SERVER=127.0.0.1:11811; " + cmd_template
+                    
+            # Inject record_video for PURE_SIM (Local Hardware Simulation)
+            if mode == "PURE_SIM" and "Heart Node" in self.name:
+                record_flag = "True" if self.app.record_video_var.get() else "False"
+                cmd_template = cmd_template.replace("is_sim:=True", f"is_sim:=True -p record_video:={record_flag}")
 
             # Set local discovery server purely for cleanliness in PURE_SIM mode
-            if mode == "PURE_SIM" and ("Joy Node" in self.name or "Controller Node" in self.name or "Heart Node" in self.name or "XRCE-DDS Agent" in self.name):
+            if mode == "PURE_SIM" and ("Joy Node" in self.name or "Controller Node" in self.name or "Heart Node" in self.name or "XRCE-DDS Agent" in self.name or "Mission Commander" in self.name or "HITL QR Scanner" in self.name):
                 cmd_template = "export ROS_DISCOVERY_SERVER=127.0.0.1:11811; " + cmd_template
 
             cmd_string = cmd_template.format(
@@ -140,7 +152,7 @@ class ProcessTab(ttk.Frame):
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                bufsize=1,
+                bufsize=0,
                 preexec_fn=os.setsid
             )
             
@@ -178,6 +190,81 @@ class ProcessTab(ttk.Frame):
         self.text_area.delete('1.0', tk.END)
         self.text_area.configure(state='disabled')
 
+class MissionControlTab(ttk.Frame):
+    def __init__(self, parent, app_ref):
+        super().__init__(parent)
+        self.app = app_ref
+        
+        # 1. Map Widget (tkintermapview)
+        try:
+            import tkintermapview
+            self.map_widget = tkintermapview.TkinterMapView(self, corner_radius=0)
+            self.map_widget.pack(fill="both", expand=True)
+            
+            # Switch to requested OpenStreetMap base map
+            self.map_widget.set_tile_server(
+                "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                max_zoom=19
+            )
+            
+            # Center on Gazebo Baylands SITL Default
+            self.map_widget.set_position(37.412173, -121.998879) 
+            self.map_widget.set_zoom(16)
+            
+            self.drone_marker = self.map_widget.set_marker(37.412173, -121.998879, text="SkyPal", marker_color_circle="#00E5FF", marker_color_outside="#020024")
+        except ImportError:
+            ttk.Label(self, text="tkintermapview not installed. Run 'pip3 install tkintermapview'").pack()
+            
+        # 2. Control Panel
+        control_frame = ttk.Frame(self)
+        control_frame.pack(fill='x', pady=5, padx=5)
+        
+        ttk.Button(control_frame, text="🛑 ABORT MISSION (RTL)", command=self.abort_mission).pack(side='left', padx=10)
+        ttk.Button(control_frame, text="🎮 RC OVERRIDE TOGGLE", command=self.rc_override).pack(side='left', padx=10)
+        
+        self.stream_ros_location()
+
+    def update_map_gui(self, lat, lon):
+        if hasattr(self, 'drone_marker'):
+            self.drone_marker.set_position(lat, lon)
+            self.map_widget.set_position(lat, lon) # Follow drone dynamically
+
+    def stream_ros_location(self):
+        # Read the GPS topic directly from ROS 2 at 10Hz locally instead of polling the cloud
+        def _tail_gps():
+            cmd = "source /opt/ros/humble/setup.bash && PYTHONUNBUFFERED=1 ros2 topic echo /fmu/out/vehicle_global_position px4_msgs/msg/VehicleGlobalPosition"
+            proc = subprocess.Popen(cmd, shell=True, executable='/bin/bash', stdout=subprocess.PIPE, text=True, preexec_fn=os.setsid)
+            
+            current_lat = None
+            current_lon = None
+            
+            try:
+                for line in iter(proc.stdout.readline, ''):
+                    line = line.strip()
+                    if line.startswith('lat:'):
+                        current_lat = float(line.split(':')[1].strip())
+                    elif line.startswith('lon:'):
+                        current_lon = float(line.split(':')[1].strip())
+                    
+                    if current_lat and current_lon and hasattr(self, 'drone_marker') and current_lat != 0.0:
+                        lat, lon = current_lat, current_lon
+                        self.after(0, lambda l_lat=lat, l_lon=lon: self.update_map_gui(l_lat, l_lon))
+                        current_lat = None
+                        current_lon = None
+            except Exception:
+                pass
+                
+        import threading
+        threading.Thread(target=_tail_gps, daemon=True).start()
+
+    def abort_mission(self):
+        cmd = "source /opt/ros/humble/setup.bash && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"nav_rtl\"}'"
+        subprocess.Popen(cmd, shell=True, executable='/bin/bash')
+        
+    def rc_override(self):
+        cmd = "source /opt/ros/humble/setup.bash && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"rc_override_toggle\"}'"
+        subprocess.Popen(cmd, shell=True, executable='/bin/bash')
+
 class PX4SkypalLauncher(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -207,6 +294,7 @@ class PX4SkypalLauncher(tk.Tk):
         self.vpn_ip_var = tk.StringVar(value="skyberry") # the Tailscale IP of Skyberry
         self.xrce_port_var = tk.StringVar(value="8888")
         self.gz_world_var = tk.StringVar(value="baylands")
+        self.record_video_var = tk.BooleanVar(value=True)
 
         # Mode Selection Frame
         mode_frame = ttk.LabelFrame(self, text="Operation Mode")
@@ -232,6 +320,8 @@ class PX4SkypalLauncher(tk.Tk):
         # PX4 exact string names for valid simulation worlds
         world_cb['values'] = ('default', 'empty', 'baylands', 'forest', 'windy', 'maze', 'rover', 'underwater')
         world_cb.grid(row=0, column=5, padx=5, pady=5)
+        
+        ttk.Checkbutton(config_frame, text="Record Camera (RPi USB)", variable=self.record_video_var).grid(row=0, column=6, padx=15, pady=5)
         
         # Ping Frame
         ping_frame = ttk.Frame(config_frame)
@@ -264,6 +354,10 @@ class PX4SkypalLauncher(tk.Tk):
         # Tabbed layout for terminals
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(expand=True, fill='both', padx=10, pady=5)
+        
+        # --- NEW MISSION CONTROL TAB ---
+        self.map_tab = MissionControlTab(self.notebook, self)
+        self.notebook.add(self.map_tab, text="🌍 Live Mission Map")
         
         self.tabs = []
         for name, template in COMMAND_TEMPLATES:
@@ -371,11 +465,38 @@ class PX4SkypalLauncher(tk.Tk):
         threading.Thread(target=run_force, daemon=True).start()
             
     def on_mode_change(self):
-        # Dynamically disable/enable tabs based on the selected mode
         mode = self.mode_var.get()
-        for i, tab in enumerate(self.tabs):
-            if "Gazebo" in tab.name:
-                self.notebook.tab(i, state=("disabled" if mode == "REAL_FLIGHT" else "normal"))
+        
+        current_tab = None
+        try:
+            current_tab = self.notebook.nametowidget(self.notebook.select())
+        except Exception:
+            pass
+
+        try:
+            self.notebook.forget(self.map_tab)
+        except tk.TclError:
+            pass
+
+        for tab in self.tabs:
+            try:
+                self.notebook.forget(tab)
+            except tk.TclError:
+                pass
+            
+        self.notebook.add(self.map_tab, text="🌍 Live Mission Map")
+        
+        for tab in self.tabs:
+            if mode == "REAL_FLIGHT" and ("Gazebo" in tab.name or "LiDAR" in tab.name):
+                continue
+            if mode in ["PURE_SIM", "RPI_SITL"] and "MAVProxy" in tab.name:
+                continue
+            self.notebook.add(tab, text=tab.name)
+            
+        if current_tab and current_tab.winfo_exists() and str(current_tab) in self.notebook.tabs():
+            self.notebook.select(current_tab)
+        else:
+            self.notebook.select(self.map_tab)
 
     def _start_next_in_sequence(self, index=0):
         if index >= len(self.tabs):
@@ -384,7 +505,8 @@ class PX4SkypalLauncher(tk.Tk):
             
         tab = self.tabs[index]
         
-        if self.notebook.tab(index, "state") == "disabled":
+        # Skip if the tab is hidden due to the selected operation mode
+        if str(tab) not in self.notebook.tabs():
             self.after(10, lambda: self._start_next_in_sequence(index + 1))
             return
             
