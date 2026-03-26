@@ -279,7 +279,7 @@ class MissionControlTab(ttk.Frame):
 
     def stream_mission_status(self):
         def _tail_status():
-            cmd = "source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && PYTHONUNBUFFERED=1 ros2 topic echo /skypal/mission_status std_msgs/msg/String"
+            cmd = "source /opt/ros/humble/setup.bash && PYTHONUNBUFFERED=1 ros2 topic echo /skypal/mission_status std_msgs/msg/String"
             proc = subprocess.Popen(cmd, shell=True, executable='/bin/bash', stdout=subprocess.PIPE, text=True, preexec_fn=os.setsid)
             try:
                 for line in iter(proc.stdout.readline, ''):
@@ -318,7 +318,7 @@ class MissionControlTab(ttk.Frame):
         self.latch_state = not self.latch_state
         state_str = "OPENED" if self.latch_state else "CLOSED"
         
-        cmd = f"source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/latch_control std_msgs/msg/String '{{data: \"{state_str}\"}}'"
+        cmd = f"source /opt/ros/humble/setup.bash && ros2 topic pub --once /skypal/latch_control std_msgs/msg/String '{{data: \"{state_str}\"}}'"
         subprocess.Popen(cmd, shell=True, executable='/bin/bash')
         
         if self.latch_state:
@@ -333,7 +333,7 @@ class MissionControlTab(ttk.Frame):
         self.btn_proceed.configure(state="disabled")
         self.btn_latch.configure(state="disabled")
         
-        cmd = "source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/local_mission_proceed std_msgs/msg/String '{data: \"PROCEED\"}'"
+        cmd = "source /opt/ros/humble/setup.bash && ros2 topic pub --once /skypal/local_mission_proceed std_msgs/msg/String '{data: \"PROCEED\"}'"
         subprocess.Popen(cmd, shell=True, executable='/bin/bash')
 
     def update_map_gui(self, lat, lon):
@@ -391,7 +391,7 @@ class MissionControlTab(ttk.Frame):
             self.map_path_obj = self.map_widget.set_path(coords, color="#FF0033", width=4)
 
     def abort_mission(self):
-        cmd = "source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"nav_rtl\"}'"
+        cmd = "source /opt/ros/humble/setup.bash && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"nav_rtl\"}'"
         subprocess.Popen(cmd, shell=True, executable='/bin/bash')
         
     def set_send_location(self, coords):
@@ -430,11 +430,11 @@ class MissionControlTab(ttk.Frame):
         send = self.send_marker.position
         recv = self.receive_marker.position
         payload = f"{send[0]},{send[1]},{recv[0]},{recv[1]}"
-        cmd = f"source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/autonomous_mission std_msgs/msg/String '{{data: \"{payload}\"}}'"
+        cmd = f"source /opt/ros/humble/setup.bash && ros2 topic pub --once /skypal/autonomous_mission std_msgs/msg/String '{{data: \"{payload}\"}}'"
         subprocess.Popen(cmd, shell=True, executable='/bin/bash')
         
     def rc_override(self):
-        cmd = "source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"rc_override_toggle\"}'"
+        cmd = "source /opt/ros/humble/setup.bash && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"rc_override_toggle\"}'"
         subprocess.Popen(cmd, shell=True, executable='/bin/bash')
 
 class PX4SkypalLauncher(tk.Tk):
