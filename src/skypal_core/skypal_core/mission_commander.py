@@ -167,7 +167,7 @@ class SkyPalMissionCommander(Node):
         # Blind the LiDAR collision protocol specifically when launching from or touching the ground
         is_near_ground = False
         if self.home_alt is not None:
-            if abs(self.current_alt - float(self.home_alt)) < 4.0:
+            if abs(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0) < 4.0:
                 is_near_ground = True
 
         if not is_near_ground and (math.isnan(self.lidar_distance) or self.lidar_distance < 3.0):
@@ -192,48 +192,72 @@ class SkyPalMissionCommander(Node):
         while yaw_error < -math.pi: yaw_error += 2 * math.pi
 
         if self.state == 'PIVOT':
-            msg.position = [float('nan'), float('nan'), -10.0]
-            msg.velocity = [0.0, 0.0, 0.0]
+            if not hasattr(self, 'takeoff_ned_x'):
+                self.takeoff_ned_x = current_ned_x
+                self.takeoff_ned_y = current_ned_y
+                
+            dx_p = self.takeoff_ned_x - current_ned_x
+            dy_p = self.takeoff_ned_y - current_ned_y
+            dist_p = math.sqrt(dx_p**2 + dy_p**2)
+            
+            vx = (dx_p / dist_p) * min(1.0, dist_p * 0.5) if dist_p > 0.1 else 0.0
+            vy = (dy_p / dist_p) * min(1.0, dist_p * 0.5) if dist_p > 0.1 else 0.0
+            
+            current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0) if self.home_alt else 0.0
+            dz = -10.0 - current_ned_z
+            vz = max(-2.0, min(2.0, dz * 0.5))
+            
+            msg.position = [float('nan'), float('nan'), float('nan')]
+            msg.velocity = [vx, vy, vz]
             
             if abs(yaw_error) > 0.15: 
                 msg.yawspeed = 0.5 if yaw_error > 0 else -0.5
                 msg.yaw = float('nan')
-            else:
+            elif abs(dz) < 0.5:
                 self.state = 'GLIDE'
-                self.get_logger().info("Vectors Aligned. Engaging 2.0m/s GLIDE thrust.")
+                self.get_logger().info("Altitude Reached! Engaging 3.0m/s GLIDE thrust.")
 
         elif self.state == 'GLIDE':
             if abs(yaw_error) > 0.5: 
                 self.state = 'PIVOT'
-            elif distance_to_target < 0.5: # PX4 Position Controller handles the approach braking natively, allowing a flawless 0.5m target switch
+            elif distance_to_target < 2.0:
                 self.state = 'LANDING'
                 self.get_logger().info(f"Waypoint Reached! Dispatching Auto-Landing block {self.current_wp_index}...")
             else:
-                msg.position = [self.target_ned_x, self.target_ned_y, -10.0]
-                msg.velocity = [0.0, 0.0, 0.0]
+                fly_speed = min(3.0, distance_to_target * 0.5) if distance_to_target > 0.1 else 0.0
+                vx = (dx / distance_to_target) * fly_speed if distance_to_target > 0.1 else 0.0
+                vy = (dy / distance_to_target) * fly_speed if distance_to_target > 0.1 else 0.0
+                
+                current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0) if self.home_alt else 0.0
+                dz = -10.0 - current_ned_z
+                vz = max(-2.0, min(2.0, dz * 0.5))
+                
+                msg.position = [float('nan'), float('nan'), float('nan')]
+                msg.velocity = [vx, vy, vz]
                 msg.yaw = target_yaw
 
         elif self.state == 'LANDING':
-            if not hasattr(self, 'landing_z_setpoint'):
-                self.landing_z_setpoint = -10.0 # Assumes entry from the prior GLIDE plane
+            dist_xy = distance_to_target
+            vx = (dx / dist_xy) * min(1.0, dist_xy * 0.5) if dist_xy > 0.1 else 0.0
+            vy = (dy / dist_xy) * min(1.0, dist_xy * 0.5) if dist_xy > 0.1 else 0.0
                 
-            # Execute 2-Stage Parabolic Drop: 1.0 m/s free-fall until 2.0m, then 0.15 m/s buttery cushion
-            if self.landing_z_setpoint < -2.0:
-                self.landing_z_setpoint += 0.1
+            # Execute 2-Stage Parabolic Velocity Drop: 1.0 m/s free-fall until 2.0m, then 0.15 m/s buttery cushion
+            current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0) if self.home_alt else 0.0
+            if current_ned_z < -2.0:
+                vz = 1.0
             else:
-                self.landing_z_setpoint += 0.015
+                vz = 0.15
             
             if int(current_time * 10) % 20 == 0:
-                self.get_logger().info(f"Descending precisely... Z-Plane locked to: {self.landing_z_setpoint:.2f}m")
+                self.get_logger().info(f"Descending precisely via explicit velocity... Z-Plane at: {current_ned_z:.2f}m")
             
-            # Override pure-velocity vectors preventing PX4 from stubbornly holding the Z-plane indefinitely in Position mode
-            msg.position = [self.target_ned_x, self.target_ned_y, self.landing_z_setpoint]
-            msg.velocity = [0.0, 0.0, 0.0]
+            msg.position = [float('nan'), float('nan'), float('nan')]
+            msg.velocity = [vx, vy, vz]
             msg.yaw = target_yaw
             
             # Since PX4 rejects standard disarms while actively in Offboard without local bounds, we deploy the 21196 hardware MAGIC_FORCE_KILL override
-            # We strictly enforce landing_z_setpoint > -1.0 to guarantee the mathematical variance buffer doesn't trip a false positive at the -10.0m layer.
-            if current_time - self.landing_start_time > 2.0 and self.is_physically_landed and self.landing_z_setpoint > -1.0:
+            # We strictly enforce current_ned_z > -1.0 to guarantee the mathematical variance buffer doesn't trip a false positive at the -10.0m layer.
+            if current_time - self.landing_start_time > 2.0 and self.is_physically_landed and current_ned_z > -1.0:
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0, 21196.0)
                 self.state = 'AWAITING_APPROVAL'
                 
@@ -250,8 +274,8 @@ class SkyPalMissionCommander(Node):
                 self.get_logger().info(f"Touchdown verified mathematically via rolling altimeter buffer! Disarmed. Active Status: {status_msg.data}")
             
         elif self.state == 'AWAITING_APPROVAL':
-            # Publish explicit ground positioning to prevent empty [0,0,0] arrays from firing the drone back to Origin
-            msg.position = [self.target_ned_x, self.target_ned_y, self.landing_z_setpoint]
+            # Publish explicit zero-velocity grounding arrays while dropping the Position block completely
+            msg.position = [float('nan'), float('nan'), float('nan')]
             msg.velocity = [0.0, 0.0, 0.0]
             msg.yaw = target_yaw
 

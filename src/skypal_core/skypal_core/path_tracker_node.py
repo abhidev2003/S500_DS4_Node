@@ -101,24 +101,24 @@ class PathTrackerNode(Node):
             
         if self.target_index < 0:
             # Reached Home Origin. Execute a heavily cushioned landing.
-            if not hasattr(self, 'landing_z_setpoint'):
-                if len(self.path) > 0:
-                    self.landing_z_setpoint = -(self.current_alt - self.path[0][2])
-                else:
-                    self.landing_z_setpoint = -10.0
+            home_lat, home_lon, home_alt = self.path[0] if len(self.path) > 0 else (self.current_lat, self.current_lon, self.current_alt)
+            dx, dy = self.wgs84_to_ned(home_lat, home_lon, self.current_lat, self.current_lon)
             
-            # The heart_node multiplexer currently forces `OffboardControlMode.position = True`.
-            # To prevent PX4 from overriding our descent logic by snapping back to its last known altitude lock,
-            # we must explicitly command downward Position arrays rather than pure Velocity.
+            dist_xy = math.sqrt(dx**2 + dy**2)
+            vx = (dx / dist_xy) * min(1.0, dist_xy * 0.5) if dist_xy > 0.1 else 0.0
+            vy = (dy / dist_xy) * min(1.0, dist_xy * 0.5) if dist_xy > 0.1 else 0.0
+            
+            # The heart_node multiplexer currently strips `OffboardControlMode.position = True` automatically recognizing NaN fields.
             # 2-Stage Drop Sequence: 1.0 m/s fall until 2 meters, then 0.15 m/s terminal cushion. (dt=0.05s)
-            if self.landing_z_setpoint < -2.0:
-                self.landing_z_setpoint += 0.05
+            current_ned_z = -(self.current_alt - home_alt)
+            if current_ned_z < -2.0:
+                vz = 1.0
             else:
-                self.landing_z_setpoint += 0.0075
+                vz = 0.15
 
             setpoint = TrajectorySetpoint()
-            setpoint.position = [0.0, 0.0, self.landing_z_setpoint] # 0,0 NED perfectly anchors the drone over the exact physical launch footprint
-            setpoint.velocity = [0.0, 0.0, 0.0]
+            setpoint.position = [float('nan'), float('nan'), float('nan')] 
+            setpoint.velocity = [vx, vy, vz]
             setpoint.yawspeed = 0.0
             setpoint.timestamp = int(self.get_clock().now().nanoseconds / 1000)
             self.traj_pub.publish(setpoint)

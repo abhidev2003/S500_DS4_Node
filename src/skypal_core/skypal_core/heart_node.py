@@ -234,7 +234,16 @@ class HeartNode(Node):
     def publish_offboard_heartbeat(self):
         # 1. Provide OffboardControlMode Signal
         mode_msg = OffboardControlMode()
-        mode_msg.position = True
+        
+        # If the autonomous system supplies a [NaN] position mask, explicitly drop PX4 into Pure Velocity to prevent 15m ceilings
+        if not self.failsafe_triggered and not self.rc_override and self.last_auto_cmd is not None:
+            if math.isnan(self.last_auto_cmd.position[0]):
+                mode_msg.position = False
+            else:
+                mode_msg.position = True
+        else:
+            mode_msg.position = True
+            
         mode_msg.velocity = True
         mode_msg.acceleration = False
         mode_msg.attitude = False
