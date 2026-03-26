@@ -19,7 +19,13 @@ class PathTrackerNode(Node):
             depth=1
         )
         
-        self.local_pos_sub = self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.pos_callback, qos_profile)
+        from rclpy.qos import qos_profile_sensor_data
+        
+        # Shotgun QoS Subscription Strategy: Bind to all 3 PX4 RMW policies simultaneously
+        # Distance-checking natively inherently drops all duplicates.
+        self.local_pos_sub_1 = self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.pos_callback, qos_profile)
+        self.local_pos_sub_2 = self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.pos_callback, 10)
+        self.local_pos_sub_3 = self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.pos_callback, qos_profile_sensor_data)
         self.sys_cmd_sub = self.create_subscription(String, '/skypal/sys_command', self.sys_cmd_callback, 10)
         self.traj_pub = self.create_publisher(TrajectorySetpoint, '/skypal/autonomous_trajectory', 10)
         
