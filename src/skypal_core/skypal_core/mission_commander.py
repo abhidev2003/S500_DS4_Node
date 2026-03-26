@@ -3,7 +3,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy, qos_profile_sensor_data
-from px4_msgs.msg import TrajectorySetpoint, VehicleCommand, VehicleGlobalPosition, VehicleAttitude, DistanceSensor
+from px4_msgs.msg import TrajectorySetpoint, VehicleCommand, VehicleGlobalPosition, VehicleAttitude, DistanceSensor, VehicleLandDetected
 from std_msgs.msg import String
 
 import math
@@ -27,6 +27,7 @@ class SkyPalMissionCommander(Node):
         self.global_pos_sub = self.create_subscription(VehicleGlobalPosition, '/fmu/out/vehicle_global_position', self.global_pos_cb, qos_profile_sensor_data)
         self.attitude_sub = self.create_subscription(VehicleAttitude, '/fmu/out/vehicle_attitude', self.attitude_cb, qos_profile_sensor_data)
         self.distance_sub = self.create_subscription(DistanceSensor, '/fmu/out/distance_sensor', self.distance_cb, qos_profile)
+        self.land_sub = self.create_subscription(VehicleLandDetected, '/fmu/out/vehicle_land_detected', self.land_cb, qos_profile_sensor_data)
         
         self.local_mission_sub = self.create_subscription(String, '/skypal/local_mission', self.local_mission_cb, 10)
 
@@ -46,6 +47,7 @@ class SkyPalMissionCommander(Node):
         
         self.lidar_distance = float('inf')
         self.lidar_active = False
+        self.is_grounded = False
 
         self.target_ned_x = 0.0
         self.target_ned_y = 0.0
@@ -89,6 +91,9 @@ class SkyPalMissionCommander(Node):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
         self.is_offboard = True
         self.state = 'PIVOT'
+
+    def land_cb(self, msg):
+        self.is_grounded = msg.ground_contact or msg.landed
 
     def distance_cb(self, msg):
         if msg.orientation == 1 or True: 
@@ -173,11 +178,17 @@ class SkyPalMissionCommander(Node):
                 msg.yaw = target_yaw
 
         elif self.state == 'LANDING':
-            # Rely strictly on firmware hardware drop targeting default touchdown protocols
-            self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
-            self.state = 'AWAITING_TAKEOFF'
-            self.landing_timestamp = current_time
-            self.get_logger().info("Firmware NAV_LAND engaged. Delaying 10s for package transfer simulation.")
+            # Abandon native NAV_LAND. Enforce physical buttery-smooth cushioned 0.15m/s descent vectors precisely identically to RTL
+            msg.position = [float('nan'), float('nan'), float('nan')]
+            msg.velocity = [0.0, 0.0, 0.15]
+            msg.yaw = target_yaw
+            
+            # Instantly kill propellers upon authentic pavement contact to prevent 0.2m freefall
+            if self.is_grounded:
+                self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0)
+                self.state = 'AWAITING_TAKEOFF'
+                self.landing_timestamp = current_time
+                self.get_logger().info("Touchdown verified natively by PX4 Accelerometer! Disarmed. Delaying 10s for package transfer simulation.")
             
         elif self.state == 'AWAITING_TAKEOFF':
             if current_time - self.landing_timestamp > 10.0:
