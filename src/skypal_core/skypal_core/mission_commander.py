@@ -260,23 +260,33 @@ class SkyPalMissionCommander(Node):
                 self.get_logger().info("Altitude Reached! Engaging 3.0m/s GLIDE thrust.")
 
         elif self.state == 'GLIDE':
-            if distance_to_target < 1.0:
+            # Dynamic thresholding logic: fly-through nodes (FLY) span loosely to preserve momentum, terminal nodes (LAND) tighten to 0.3m.
+            threshold = 1.5 if self.current_wp_action == 'FLY' else 0.3
+            
+            if distance_to_target < threshold:
                 if self.current_wp_action == 'LAND':
                     self.state = 'LANDING'
                     self.get_logger().info(f"Terminus Reached! Dispatching Parabolic Auto-Landing {self.current_wp_tag}...")
+                    self.landing_start_time = self.get_clock().now().nanoseconds / 1e9
                 else:
                     self.get_logger().info("Crossed discrete routing block, mapping next sequence natively...")
                     self.current_wp_index += 1
                     self.advance_waypoint()
             else:
-                # Fly-through waypoints trace flawlessly at full 3.0m/s speeds. Landing nodes organic cushion.
-                if self.current_wp_action == 'LAND':
-                    fly_speed = min(3.0, distance_to_target * 0.6) if distance_to_target > 0.1 else 0.0
+                if self.current_wp_action == 'FLY':
+                    # Cruise cleanly through trace waypoints
+                    Kp = 3.0
+                    vx = (dx / distance_to_target) * Kp if distance_to_target > 0.1 else 0.0
+                    vy = (dy / distance_to_target) * Kp if distance_to_target > 0.1 else 0.0
                 else:
-                    fly_speed = 3.0
-                    
-                vx = (dx / distance_to_target) * fly_speed if distance_to_target > 0.1 else 0.0
-                vy = (dy / distance_to_target) * fly_speed if distance_to_target > 0.1 else 0.0
+                    # Precise Proportional Geometry strictly targeting the payload marker, decaying thrust identically to the error
+                    Kp = 1.0
+                    vx = dx * Kp
+                    vy = dy * Kp
+                    speed = math.sqrt(vx**2 + vy**2)
+                    if speed > 3.0:
+                        vx = (vx / speed) * 3.0
+                        vy = (vy / speed) * 3.0
                 
                 current_ned_z = -(self.current_alt - float(self.home_alt)) if self.home_alt is not None else 0.0
                 dz = -10.0 - current_ned_z
@@ -285,10 +295,7 @@ class SkyPalMissionCommander(Node):
                 msg.position = [float('nan'), float('nan'), float('nan')]
                 msg.velocity = [vx, vy, vz]
                 
-                if distance_to_target > 2.0:
-                    msg.yaw = target_yaw
-                else:
-                    msg.yaw = self.current_heading
+                msg.yaw = target_yaw
 
         elif self.state == 'LANDING':
             # Target is already enveloped within 0.5m variance. Arrest all horizontal P-loops instantly to kill oscillations.
