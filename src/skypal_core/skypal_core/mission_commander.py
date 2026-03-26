@@ -85,6 +85,9 @@ class SkyPalMissionCommander(Node):
             self.advance_waypoint()
 
     def advance_waypoint(self):
+        if hasattr(self, 'landing_z_setpoint'):
+            delattr(self, 'landing_z_setpoint')
+            
         if self.current_wp_index >= len(self.waypoints):
             self.state = 'IDLE'
             self.get_logger().info("🎉 Complete Mission logic loop finished!")
@@ -211,9 +214,15 @@ class SkyPalMissionCommander(Node):
                 msg.yaw = target_yaw
 
         elif self.state == 'LANDING':
-            # Abandon native NAV_LAND. Enforce physical buttery-smooth cushioned 0.15m/s descent vectors precisely identically to RTL
-            msg.position = [float('nan'), float('nan'), float('nan')]
-            msg.velocity = [0.0, 0.0, 0.15]
+            if not hasattr(self, 'landing_z_setpoint'):
+                self.landing_z_setpoint = -10.0 # Assumes entry from the prior GLIDE plane
+                
+            # Dictate 0.15 m/s physical descent exactly against the absolute Position-block (dt=0.1s at 10Hz = 0.015m)
+            self.landing_z_setpoint += 0.015
+            
+            # Override pure-velocity vectors preventing PX4 from stubbornly holding the Z-plane indefinitely in Position mode
+            msg.position = [self.target_ned_x, self.target_ned_y, self.landing_z_setpoint]
+            msg.velocity = [0.0, 0.0, 0.0]
             msg.yaw = target_yaw
             
             # Since PX4 rejects standard disarms while actively in Offboard without local bounds, we deploy the 21196 hardware MAGIC_FORCE_KILL override
