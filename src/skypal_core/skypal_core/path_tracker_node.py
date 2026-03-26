@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from px4_msgs.msg import VehicleGlobalPosition, TrajectorySetpoint
+from px4_msgs.msg import VehicleGlobalPosition, TrajectorySetpoint, VehicleCommand
 from std_msgs.msg import String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import math
@@ -17,6 +17,7 @@ class PathTrackerNode(Node):
         self.global_pos_sub = self.create_subscription(VehicleGlobalPosition, '/fmu/out/vehicle_global_position', self.pos_callback, qos_profile_sensor_data)
         self.sys_cmd_sub = self.create_subscription(String, '/skypal/sys_command', self.sys_cmd_callback, 10)
         self.traj_pub = self.create_publisher(TrajectorySetpoint, '/skypal/autonomous_trajectory', 10)
+        self.command_pub = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', 10)
         
         self.path = [] # List of (lat, lon, alt)
         self.record_threshold = 1.0 # Meters logic
@@ -87,6 +88,21 @@ class PathTrackerNode(Node):
             setpoint.yawspeed = 0.0
             setpoint.timestamp = int(self.get_clock().now().nanoseconds / 1000)
             self.traj_pub.publish(setpoint)
+            
+            # Absolute ground-lock detection against logged origin
+            if len(self.path) > 0:
+                home_alt = self.path[0][2]
+                if abs(self.current_alt - home_alt) < 0.2:
+                    msg = VehicleCommand()
+                    msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
+                    msg.param1 = 0.0 # Disarm payload
+                    msg.target_system = 1
+                    msg.target_component = 1
+                    msg.source_system = 1
+                    msg.source_component = 1
+                    msg.from_external = True
+                    msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+                    self.command_pub.publish(msg)
             return
             
         target_lat, target_lon, target_alt = self.path[self.target_index]
