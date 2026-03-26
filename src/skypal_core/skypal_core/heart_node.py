@@ -153,15 +153,18 @@ class HeartNode(Node):
             self.log("INFO", "Received Land command. Switching to Auto-Land Native Mode.")
             self.land()
             self.offboard_engaged = False
-            
+        elif command == "nav_rtl":
+            # Force yield to autonomous traceback logic
+            self.rc_override = False
+            self.get_logger().info("Yielding RC trajectory to Tracer.")
+        elif command == "auto_mode_yield":
+            self.rc_override = False
+            self.get_logger().info("Yielding RC trajectory to Autonomous Commander.")
         elif command == "rc_override_toggle":
             self.rc_override = not self.rc_override
             state = "RC PRIORITY" if self.rc_override else "MISSION AUTONOMY"
             self.log("WARN", f"OVERRIDE TRIGGERED: Switched to {state}")
             
-        elif command == "nav_rtl":
-            self.log("WARN", "CUSTOM RTL TRIGGERED: Yielding RC Control to the Path Tracker.")
-            self.rc_override = False # Surrender joystick control to Autonomy MultiPlex
             self.failsafe_triggered = False
             
         elif command == "toggle_recording" and self.record_video:

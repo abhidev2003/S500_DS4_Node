@@ -21,6 +21,7 @@ class SkyPalMissionCommander(Node):
         )
         self.setpoint_pub = self.create_publisher(TrajectorySetpoint, '/skypal/autonomous_trajectory', 10)
         self.command_pub = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
+        self.sys_pub = self.create_publisher(String, '/skypal/sys_command', 10)
 
         # Utilize Sensor Data QoS strictly to combat FastDDS strict matching blockades
         self.global_pos_sub = self.create_subscription(VehicleGlobalPosition, '/fmu/out/vehicle_global_position', self.global_pos_cb, qos_profile_sensor_data)
@@ -78,6 +79,11 @@ class SkyPalMissionCommander(Node):
         target_lat, target_lon = self.waypoints[self.current_wp_index]
         self.target_ned_x, self.target_ned_y = self.wgs84_to_ned(target_lat, target_lon)
         self.get_logger().info(f"Target Acquired (Waypoint {self.current_wp_index}): NED X={self.target_ned_x:.2f}m, Y={self.target_ned_y:.2f}m")
+        
+        # Fire signal to multiplexer to unblock channel
+        sys_msg = String()
+        sys_msg.data = "auto_mode_yield"
+        self.sys_pub.publish(sys_msg)
         
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1.0, 6.0) # Offboard
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
