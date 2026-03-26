@@ -30,7 +30,9 @@ setup(
             'heart_node = skypal_core.heart_node:main',
             'mission_commander = skypal_core.mission_commander:main',
             'yolo_obstacle_detector = skypal_core.yolo_obstacle_detector:main',
-            'sonar_multiplex = skypal_core.sonar_multiplex:main'
+            'sonar_multiplex = skypal_core.sonar_multiplex:main',
+            'qr_scanner_node = skypal_core.qr_scanner_node:main',
+            'path_tracker_node = skypal_core.path_tracker_node:main'
         ],
     },
 )

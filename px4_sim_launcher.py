@@ -20,7 +20,8 @@ COMMAND_TEMPLATES = [
     ("7. LiDAR Core Logic", "bash -c 'source /opt/ros/humble/setup.bash && source ~/skypal_ws/install/setup.bash && python3 ~/skypal_ws/src/skypal_core/skypal_core/lidar_tester.py'"),
     ("8. MAVProxy (TELEM 1)", "echo 'MAVProxy telemetry not required for purely local SIM'"),
     ("9. Mission Commander", "bash -c 'source ~/skypal_ws/install/setup.bash && ros2 run skypal_core mission_commander'"),
-    ("10. HITL QR Scanner", "bash -c 'source ~/skypal_ws/install/setup.bash && ros2 run skypal_core qr_scanner_node'")
+    ("10. HITL QR Scanner", "bash -c 'source ~/skypal_ws/install/setup.bash && ros2 run skypal_core qr_scanner_node'"),
+    ("11. Path Tracker", "bash -c 'source ~/skypal_ws/install/setup.bash && ros2 run skypal_core path_tracker_node'")
 ]
 
 class ProcessTab(ttk.Frame):
@@ -127,7 +128,7 @@ class ProcessTab(ttk.Frame):
                     cmd_template = f"sshpass -p 'skypal1234' ssh -tt -o StrictHostKeyChecking=no skypal@{vpn_ip} \"bash -c 'source /opt/ros/humble/setup.bash && source ~/skypal_ws/install/setup.bash && export ROS_DISCOVERY_SERVER={local_ip}:11811 && ros2 run skypal_core qr_scanner_node'\""
 
                 # The local PC nodes must point to the local 0.0.0.0 server so they can see EACH OTHER
-                elif "Joy Node" in self.name or "Controller Node" in self.name or ("XRCE-DDS Agent" in self.name and mode == "RPI_SITL") or "Mission Commander" in self.name:
+                elif "Joy Node" in self.name or "Controller Node" in self.name or ("XRCE-DDS Agent" in self.name and mode == "RPI_SITL") or "Mission Commander" in self.name or "Path Tracker" in self.name:
                     cmd_template = "export ROS_DISCOVERY_SERVER=127.0.0.1:11811; " + cmd_template
                     
             # Inject record_video for PURE_SIM (Local Hardware Simulation)
@@ -136,7 +137,7 @@ class ProcessTab(ttk.Frame):
                 cmd_template = cmd_template.replace("is_sim:=True", f"is_sim:=True -p record_video:={record_flag}")
 
             # Set local discovery server purely for cleanliness in PURE_SIM mode
-            if mode == "PURE_SIM" and ("Joy Node" in self.name or "Controller Node" in self.name or "Heart Node" in self.name or "XRCE-DDS Agent" in self.name or "Mission Commander" in self.name or "HITL QR Scanner" in self.name):
+            if mode == "PURE_SIM" and ("Joy Node" in self.name or "Controller Node" in self.name or "Heart Node" in self.name or "XRCE-DDS Agent" in self.name or "Mission Commander" in self.name or "HITL QR Scanner" in self.name or "Path Tracker" in self.name):
                 cmd_template = "export ROS_DISCOVERY_SERVER=127.0.0.1:11811; " + cmd_template
 
             cmd_string = cmd_template.format(
@@ -249,6 +250,21 @@ class MissionControlTab(ttk.Frame):
                     if current_lat and current_lon and hasattr(self, 'drone_marker') and current_lat != 0.0:
                         lat, lon = current_lat, current_lon
                         self.after(0, lambda l_lat=lat, l_lon=lon: self.update_map_gui(l_lat, l_lon))
+                        
+                        import math
+                        if not hasattr(self, 'path_coords'):
+                            self.path_coords = []
+                            self.map_path_obj = None
+                            
+                        if len(self.path_coords) == 0:
+                            self.path_coords.append((lat, lon))
+                        else:
+                            last_lat, last_lon = self.path_coords[-1]
+                            dist = math.sqrt((lat - last_lat)**2 + (lon - last_lon)**2)
+                            if dist > 0.00002: # Log distance threshold mapping to approx 2 meters 
+                                self.path_coords.append((lat, lon))
+                                self.after(0, lambda p=list(self.path_coords): self.update_map_path(p))
+                        
                         current_lat = None
                         current_lon = None
             except Exception:
@@ -256,6 +272,12 @@ class MissionControlTab(ttk.Frame):
                 
         import threading
         threading.Thread(target=_tail_gps, daemon=True).start()
+
+    def update_map_path(self, coords):
+        if hasattr(self, 'map_path_obj') and self.map_path_obj:
+            self.map_path_obj.set_position_list(coords)
+        else:
+            self.map_path_obj = self.map_widget.set_path(coords, color="#FF0033", width=4)
 
     def abort_mission(self):
         cmd = "source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"nav_rtl\"}'"

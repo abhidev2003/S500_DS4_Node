@@ -9,6 +9,8 @@ from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
 import math
 import os
 import time
+import subprocess
+import signal
 
 class HeartNode(Node):
     def __init__(self):
@@ -46,6 +48,10 @@ class HeartNode(Node):
         
         self.local_pos_sub = self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.local_pos_callback, qos_profile)
         self.attitude_sub = self.create_subscription(VehicleAttitude, '/fmu/out/vehicle_attitude', self.attitude_callback, qos_profile)
+        
+        # Subscription for Autonomous Mission Commands
+        self.auto_sub = self.create_subscription(TrajectorySetpoint, '/skypal/autonomous_trajectory', self.auto_callback, 10)
+        
         # Publishers to PX4 (XRCE-DDS)
         self.offboard_mode_pub = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
         self.trajectory_pub = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
@@ -54,8 +60,13 @@ class HeartNode(Node):
         # State Variables
         self.last_heartbeat_time = self.get_clock().now()
         self.last_cmd = Twist()
+        self.last_auto_cmd = None
+        self.last_auto_time = self.get_clock().now()
+        
         self.failsafe_triggered = False
         self.offboard_engaged = False
+        self.rc_override = False # Starts tracking Mission Commander
+        
         self.max_latency_sec = 2.0 # Increased for Mobile Network (JIOPAL) Jitter Tolerance
         self.dt = 0.05 # 20Hz loop
         
@@ -67,7 +78,14 @@ class HeartNode(Node):
         self.offboard_timer = self.create_timer(self.dt, self.publish_offboard_heartbeat) # 20Hz Setpoint Publisher
         
         self.declare_parameter('is_sim', True)
+        self.declare_parameter('record_video', False)
+        
         self.is_sim = self.get_parameter('is_sim').value
+        self.record_video = self.get_parameter('record_video').value
+        
+        # Recording State
+        self.is_recording = False
+        self.recording_proc = None
         
         log_type = "sim" if self.is_sim else "real"
         log_dir = os.path.expanduser(f"~/skypal_ws/logs/{log_type}")
@@ -112,6 +130,10 @@ class HeartNode(Node):
         # The `monitor_connection` method correctly handles interval dropouts locally.
         self.last_heartbeat_time = now
 
+    def auto_callback(self, msg):
+        self.last_auto_cmd = msg
+        self.last_auto_time = self.get_clock().now()
+
     def cmd_callback(self, msg):
         self.last_cmd = msg
 
@@ -131,6 +153,42 @@ class HeartNode(Node):
             self.log("INFO", "Received Land command. Switching to Auto-Land Native Mode.")
             self.land()
             self.offboard_engaged = False
+            
+        elif command == "rc_override_toggle":
+            self.rc_override = not self.rc_override
+            state = "RC PRIORITY" if self.rc_override else "MISSION AUTONOMY"
+            self.log("WARN", f"OVERRIDE TRIGGERED: Switched to {state}")
+            
+        elif command == "nav_rtl":
+            self.log("WARN", "CUSTOM RTL TRIGGERED: Yielding RC Control to the Path Tracker.")
+            self.rc_override = False # Surrender joystick control to Autonomy MultiPlex
+            self.failsafe_triggered = False
+            
+        elif command == "toggle_recording" and self.record_video:
+            if not self.is_recording:
+                self.log("INFO", "Recording Started via USB/V4L2 capture.")
+                self.is_recording = True
+                
+                # Setup Paths - Dynamic Fallback mapping
+                usb_dir = "/mnt/Storage_Pal/camera_logs"
+                fallback_dir = os.path.expanduser("~/skypal_ws/logs/camera")
+                save_dir = usb_dir if os.path.ismount("/mnt/Storage_Pal") else fallback_dir
+                os.makedirs(save_dir, exist_ok=True)
+                
+                filename = os.path.join(save_dir, time.strftime("flight_video_%Y-%m-%d_%H-%M-%S.avi"))
+                
+                # Spawn lightweight ffmpeg capture directly from V4L2 device (Non-blocking for Heart loop safety)
+                cmd = f"ffmpeg -loglevel quiet -y -f v4l2 -framerate 15 -video_size 320x240 -i /dev/video0 -c:v mpeg4 -q:v 5 {filename}"
+                self.recording_proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)
+            else:
+                self.log("INFO", "Recording Stopped. Video file saved.")
+                self.is_recording = False
+                if self.recording_proc:
+                    try:
+                        os.killpg(os.getpgid(self.recording_proc.pid), signal.SIGTERM)
+                    except Exception:
+                        pass
+                    self.recording_proc = None
 
     def send_vehicle_command(self, command, param1=0.0, param2=0.0):
         msg = VehicleCommand()
@@ -194,8 +252,20 @@ class HeartNode(Node):
             self.smooth_v_yaw = 0.0
             msg.velocity = [0.0, 0.0, 0.0]
             msg.yawspeed = 0.0
+            
+        elif not self.rc_override and self.last_auto_cmd is not None:
+            # If not in RC override and Mission Commander is sending Trajectories
+            # Just pipe the autonomous trajectory straight down to PX4
+            # (Fallback to hover if autonomous signal drops > 1.0s)
+            time_since_auto = (self.get_clock().now() - self.last_auto_time).nanoseconds / 1e9
+            if time_since_auto > 1.0:
+                self.log("WARN", "Autonomous Heartbeat Lost! Hovering to wait for routing.")
+                msg.velocity = [0.0, 0.0, 0.0]
+                msg.yawspeed = 0.0
+            else:
+                msg = self.last_auto_cmd
         else:
-            # Body Frame Control Logic:
+            # Body Frame Control Logic (RC OVERRIDE ACTIVE or No Auto Signal)
             # ROS 2 Twist is FLU (Forward, Left, Up)
             # PX4 Body is FRD (Forward, Right, Down)
             
@@ -233,6 +303,11 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        if node.recording_proc:
+            try:
+                os.killpg(os.getpgid(node.recording_proc.pid), signal.SIGTERM)
+            except Exception:
+                pass
         node.destroy_node()
         rclpy.shutdown()
 
