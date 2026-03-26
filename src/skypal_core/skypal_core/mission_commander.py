@@ -2,8 +2,8 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from px4_msgs.msg import TrajectorySetpoint, VehicleCommand, VehicleGlobalPosition, VehicleLocalPosition, DistanceSensor
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy, qos_profile_sensor_data
+from px4_msgs.msg import TrajectorySetpoint, VehicleCommand, VehicleGlobalPosition, VehicleAttitude, DistanceSensor
 from std_msgs.msg import String
 
 import math
@@ -22,16 +22,15 @@ class SkyPalMissionCommander(Node):
         self.setpoint_pub = self.create_publisher(TrajectorySetpoint, '/skypal/autonomous_trajectory', 10)
         self.command_pub = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
 
-        self.global_pos_sub = self.create_subscription(VehicleGlobalPosition, '/fmu/out/vehicle_global_position', self.global_pos_cb, 10)
-        self.local_pos_sub = self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.local_pos_cb, 10)
+        # Utilize Sensor Data QoS strictly to combat FastDDS strict matching blockades
+        self.global_pos_sub = self.create_subscription(VehicleGlobalPosition, '/fmu/out/vehicle_global_position', self.global_pos_cb, qos_profile_sensor_data)
+        self.attitude_sub = self.create_subscription(VehicleAttitude, '/fmu/out/vehicle_attitude', self.attitude_cb, qos_profile_sensor_data)
         self.distance_sub = self.create_subscription(DistanceSensor, '/fmu/out/distance_sensor', self.distance_cb, qos_profile)
         
-        # New Local UI Mission Dispatcher
         self.local_mission_sub = self.create_subscription(String, '/skypal/local_mission', self.local_mission_cb, 10)
 
         self.get_logger().info("🛡️ Drone Autonomy Core offline and eagerly awaiting UI map dispatch.")
 
-        # Mission State
         self.state = 'IDLE' # IDLE -> PIVOT -> GLIDE -> LANDING -> AWAITING_TAKEOFF -> (IDLE)
         self.waypoints = []
         self.current_wp_index = 0
@@ -42,19 +41,14 @@ class SkyPalMissionCommander(Node):
         self.home_lon = None
         self.current_lat = 0.0
         self.current_lon = 0.0
-        self.current_x = 0.0
-        self.current_y = 0.0
-        self.current_z = 0.0
         self.current_heading = 0.0
         
-        # Lunar Lidar failsafe states
         self.lidar_distance = float('inf')
         self.lidar_active = False
 
         self.target_ned_x = 0.0
         self.target_ned_y = 0.0
         
-        # High-frequency timer for PX4 Offboard (10Hz)
         self.timer = self.create_timer(0.1, self.offboard_heartbeat)
 
     def local_mission_cb(self, msg):
@@ -67,7 +61,6 @@ class SkyPalMissionCommander(Node):
             self.get_logger().info("📥 Local Multi-Waypoint Mission Intercepted via GUI Map!")
             send_lat, send_lon, recv_lat, recv_lon = parts
             
-            # Mission Phase Plan
             self.waypoints = [
                 (send_lat, send_lon),       # Wp 0: Send Location
                 (recv_lat, recv_lon),       # Wp 1: Receive Location
@@ -86,7 +79,6 @@ class SkyPalMissionCommander(Node):
         self.target_ned_x, self.target_ned_y = self.wgs84_to_ned(target_lat, target_lon)
         self.get_logger().info(f"Target Acquired (Waypoint {self.current_wp_index}): NED X={self.target_ned_x:.2f}m, Y={self.target_ned_y:.2f}m")
         
-        # Spool Up
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1.0, 6.0) # Offboard
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
         self.is_offboard = True
@@ -101,17 +93,15 @@ class SkyPalMissionCommander(Node):
         self.current_lat = msg.lat
         self.current_lon = msg.lon
         
-        # Retain original spawn origin as Base Station fallback
         if self.home_lat is None and msg.lat != 0.0:
             self.home_lat = msg.lat
             self.home_lon = msg.lon
             self.get_logger().info(f"📍 Home Base Station physically Locked: {self.home_lat}, {self.home_lon}")
 
-    def local_pos_cb(self, msg):
-        self.current_x = msg.x
-        self.current_y = msg.y
-        self.current_z = msg.z
-        self.current_heading = msg.heading
+    def attitude_cb(self, msg):
+        # Decode Quaternion mathematically to extract Yaw (Heading)
+        q = msg.q
+        self.current_heading = math.atan2(2.0 * (q[0] * q[3] + q[1] * q[2]), 1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]))
 
     def wgs84_to_ned(self, target_lat, target_lon):
         r_earth = 6378137.0
@@ -142,8 +132,10 @@ class SkyPalMissionCommander(Node):
         msg = TrajectorySetpoint()
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
 
-        dx = self.target_ned_x - self.current_x
-        dy = self.target_ned_y - self.current_y
+        # Dynamic WGS84 offset mapping bypassing isolated local position channels
+        current_ned_x, current_ned_y = self.wgs84_to_ned(self.current_lat, self.current_lon)
+        dx = self.target_ned_x - current_ned_x
+        dy = self.target_ned_y - current_ned_y
         distance_to_target = math.sqrt(dx**2 + dy**2)
         
         target_yaw = math.atan2(dy, dx)
@@ -175,7 +167,7 @@ class SkyPalMissionCommander(Node):
                 msg.yaw = target_yaw
 
         elif self.state == 'LANDING':
-            # Rely strictly on firmware hardware drop since this simulates the old logic behavior.
+            # Rely strictly on firmware hardware drop targeting default touchdown protocols
             self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
             self.state = 'AWAITING_TAKEOFF'
             self.landing_timestamp = current_time
