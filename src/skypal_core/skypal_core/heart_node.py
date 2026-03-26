@@ -247,7 +247,7 @@ class HeartNode(Node):
         msg.position = [float('nan'), float('nan'), float('nan')]
         msg.yaw = float('nan')
         
-        if self.failsafe_triggered or not self.offboard_engaged:
+        if self.failsafe_triggered:
             # Hover in place exactly where the drone is
             self.smooth_v_body_x = 0.0
             self.smooth_v_body_y = 0.0
