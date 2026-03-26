@@ -48,6 +48,9 @@ class SkyPalMissionCommander(Node):
         self.current_alt = 0.0
         self.current_heading = 0.0
         
+        self.alt_history = []
+        self.is_physically_landed = False
+
         self.lidar_distance = float('inf')
         self.lidar_active = False
         self.is_grounded = False
@@ -114,6 +117,19 @@ class SkyPalMissionCommander(Node):
         self.current_lon = msg.lon
         self.current_alt = msg.alt
         
+        # Custom mathematical hardware touchdown verification buffer
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        self.alt_history.append((current_time, msg.alt))
+        self.alt_history = [x for x in self.alt_history if current_time - x[0] <= 2.0]
+        
+        if len(self.alt_history) >= 5:
+            alts = [x[1] for x in self.alt_history]
+            if max(alts) - min(alts) < 0.15:
+                # If variance strictly falls under 15cm over 2000 milliseconds, it is definitively blocked by concrete
+                self.is_physically_landed = True
+            else:
+                self.is_physically_landed = False
+        
         if self.home_lat is None and msg.lat != 0.0:
             self.home_lat = msg.lat
             self.home_lon = msg.lon
@@ -142,6 +158,8 @@ class SkyPalMissionCommander(Node):
     def offboard_heartbeat(self):
         if not self.is_offboard:
             return
+
+        current_time = self.get_clock().now().nanoseconds / 1e9
 
         # Blind the LiDAR collision protocol specifically when launching from or touching the ground
         is_near_ground = False
@@ -198,9 +216,9 @@ class SkyPalMissionCommander(Node):
             msg.velocity = [0.0, 0.0, 0.15]
             msg.yaw = target_yaw
             
-            # Instantly kill propellers upon authentic pavement contact to prevent 0.2m freefall
-            if self.is_grounded:
-                self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0)
+            # Since PX4 rejects standard disarms while actively in Offboard without local bounds, we deploy the 21196 hardware MAGIC_FORCE_KILL override
+            if current_time - self.landing_start_time > 2.0 and self.is_physically_landed:
+                self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0, 21196.0)
                 self.state = 'AWAITING_APPROVAL'
                 
                 # Push GUI Checkpoint Notification

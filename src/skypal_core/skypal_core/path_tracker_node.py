@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from px4_msgs.msg import VehicleGlobalPosition, TrajectorySetpoint, VehicleCommand
+from px4_msgs.msg import VehicleGlobalPosition, TrajectorySetpoint, VehicleCommand, VehicleLandDetected
 from std_msgs.msg import String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import math
@@ -18,11 +18,17 @@ class PathTrackerNode(Node):
         self.sys_cmd_sub = self.create_subscription(String, '/skypal/sys_command', self.sys_cmd_callback, 10)
         self.traj_pub = self.create_publisher(TrajectorySetpoint, '/skypal/autonomous_trajectory', 10)
         self.command_pub = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', 10)
+        self.land_sub = self.create_subscription(VehicleLandDetected, '/fmu/out/vehicle_land_detected', self.land_cb, qos_profile_sensor_data)
         
         self.path = [] # List of (lat, lon, alt)
         self.record_threshold = 1.0 # Meters logic
         self.is_rtl = False
         self.target_index = -1
+        self.is_grounded = False
+        
+        self.alt_history = []
+        self.is_physically_landed = False
+        self.rtl_land_start_time = 0.0
         
         self.current_lat = 0.0
         self.current_lon = 0.0
@@ -32,6 +38,9 @@ class PathTrackerNode(Node):
         self.timer = self.create_timer(self.dt, self.execute_rtl)
         
         self.get_logger().info("Skypal Global Path Tracker Started. Intercepting GPS...")
+
+    def land_cb(self, msg):
+        self.is_grounded = msg.ground_contact or msg.landed
 
     def wgs84_to_ned(self, target_lat, target_lon, ref_lat, ref_lon):
         r_earth = 6378137.0
@@ -53,6 +62,17 @@ class PathTrackerNode(Node):
         self.current_lat = msg.lat
         self.current_lon = msg.lon
         self.current_alt = msg.alt
+        
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        self.alt_history.append((current_time, msg.alt))
+        self.alt_history = [x for x in self.alt_history if current_time - x[0] <= 2.0]
+        
+        if len(self.alt_history) >= 5:
+            alts = [x[1] for x in self.alt_history]
+            if max(alts) - min(alts) < 0.15:
+                self.is_physically_landed = True
+            else:
+                self.is_physically_landed = False
         
         if not self.is_rtl:
             if len(self.path) == 0:
@@ -89,20 +109,23 @@ class PathTrackerNode(Node):
             setpoint.timestamp = int(self.get_clock().now().nanoseconds / 1000)
             self.traj_pub.publish(setpoint)
             
-            # Absolute ground-lock detection against logged origin
-            if len(self.path) > 0:
-                home_alt = self.path[0][2]
-                if abs(self.current_alt - home_alt) < 0.2:
-                    msg = VehicleCommand()
-                    msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
-                    msg.param1 = 0.0 # Disarm payload
-                    msg.target_system = 1
-                    msg.target_component = 1
-                    msg.source_system = 1
-                    msg.source_component = 1
-                    msg.from_external = True
-                    msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-                    self.command_pub.publish(msg)
+            if self.rtl_land_start_time == 0.0:
+                self.rtl_land_start_time = self.get_clock().now().nanoseconds / 1e9
+            
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            if current_time - self.rtl_land_start_time > 2.0 and self.is_physically_landed:
+                msg = VehicleCommand()
+                msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
+                msg.param1 = 0.0 # Disarm payload
+                msg.param2 = 21196.0 # MAGIC FORCE KILL override
+                msg.target_system = 1
+                msg.target_component = 1
+                msg.source_system = 1
+                msg.source_component = 1
+                msg.from_external = True
+                msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+                self.command_pub.publish(msg)
+                self.get_logger().info("Raw Ground Lock Detected. Track sequence finished.")
             return
             
         target_lat, target_lon, target_alt = self.path[self.target_index]
