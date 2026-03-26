@@ -127,7 +127,7 @@ class PathTrackerNode(Node):
                 self.rtl_land_start_time = self.get_clock().now().nanoseconds / 1e9
             
             current_time = self.get_clock().now().nanoseconds / 1e9
-            if current_time - self.rtl_land_start_time > 2.0 and self.is_physically_landed:
+            if current_time - self.rtl_land_start_time > 2.0 and self.is_physically_landed and self.landing_z_setpoint > -1.0:
                 msg = VehicleCommand()
                 msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
                 msg.param1 = 0.0 # Disarm payload

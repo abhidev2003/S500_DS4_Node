@@ -205,12 +205,12 @@ class SkyPalMissionCommander(Node):
         elif self.state == 'GLIDE':
             if abs(yaw_error) > 0.5: 
                 self.state = 'PIVOT'
-            elif distance_to_target < 2.0:
+            elif distance_to_target < 0.5: # PX4 Position Controller handles the approach braking natively, allowing a flawless 0.5m target switch
                 self.state = 'LANDING'
                 self.get_logger().info(f"Waypoint Reached! Dispatching Auto-Landing block {self.current_wp_index}...")
             else:
-                msg.position = [float('nan'), float('nan'), -10.0]
-                msg.velocity = [2.0 * math.cos(self.current_heading), 2.0 * math.sin(self.current_heading), 0.0]
+                msg.position = [self.target_ned_x, self.target_ned_y, -10.0]
+                msg.velocity = [0.0, 0.0, 0.0]
                 msg.yaw = target_yaw
 
         elif self.state == 'LANDING':
@@ -232,7 +232,8 @@ class SkyPalMissionCommander(Node):
             msg.yaw = target_yaw
             
             # Since PX4 rejects standard disarms while actively in Offboard without local bounds, we deploy the 21196 hardware MAGIC_FORCE_KILL override
-            if current_time - self.landing_start_time > 2.0 and self.is_physically_landed:
+            # We strictly enforce landing_z_setpoint > -1.0 to guarantee the mathematical variance buffer doesn't trip a false positive at the -10.0m layer.
+            if current_time - self.landing_start_time > 2.0 and self.is_physically_landed and self.landing_z_setpoint > -1.0:
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0, 21196.0)
                 self.state = 'AWAITING_APPROVAL'
                 
@@ -246,11 +247,13 @@ class SkyPalMissionCommander(Node):
                     status_msg.data = "ARRIVED_HOME"
                 self.status_pub.publish(status_msg)
                 
-                self.get_logger().info(f"Touchdown verified natively by PX4 Accelerometer! Disarmed. Active Status: {status_msg.data}")
+                self.get_logger().info(f"Touchdown verified mathematically via rolling altimeter buffer! Disarmed. Active Status: {status_msg.data}")
             
         elif self.state == 'AWAITING_APPROVAL':
-            # Halt Offboard trajectory fields entirely. PX4 rests cleanly on the ground ignoring empty arrays internally.
-            pass
+            # Publish explicit ground positioning to prevent empty [0,0,0] arrays from firing the drone back to Origin
+            msg.position = [self.target_ned_x, self.target_ned_y, self.landing_z_setpoint]
+            msg.velocity = [0.0, 0.0, 0.0]
+            msg.yaw = target_yaw
 
         self.setpoint_pub.publish(msg)
 
