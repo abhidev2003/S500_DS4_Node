@@ -167,7 +167,7 @@ class SkyPalMissionCommander(Node):
         # Blind the LiDAR collision protocol specifically when launching from or touching the ground
         is_near_ground = False
         if self.home_alt is not None:
-            if abs(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0) < 4.0:
+            if abs(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0 if self.home_alt is not None else 0.0) < 4.0:
                 is_near_ground = True
 
         if not is_near_ground and (math.isnan(self.lidar_distance) or self.lidar_distance < 3.0):
@@ -203,7 +203,7 @@ class SkyPalMissionCommander(Node):
             vx = (dx_p / dist_p) * min(1.0, dist_p * 0.5) if dist_p > 0.1 else 0.0
             vy = (dy_p / dist_p) * min(1.0, dist_p * 0.5) if dist_p > 0.1 else 0.0
             
-            current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0) if self.home_alt else 0.0
+            current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0 if self.home_alt is not None else 0.0) if self.home_alt else 0.0
             dz = -10.0 - current_ned_z
             vz = max(-2.0, min(2.0, dz * 0.5))
             
@@ -220,15 +220,17 @@ class SkyPalMissionCommander(Node):
         elif self.state == 'GLIDE':
             if abs(yaw_error) > 0.5: 
                 self.state = 'PIVOT'
-            elif distance_to_target < 2.0:
+            elif distance_to_target < 0.5:
+                # Only dispatch the DROP cycle when the drone has entirely exhausted its X/Y momentum organically!
                 self.state = 'LANDING'
                 self.get_logger().info(f"Waypoint Reached! Dispatching Auto-Landing block {self.current_wp_index}...")
             else:
-                fly_speed = min(3.0, distance_to_target * 0.5) if distance_to_target > 0.1 else 0.0
+                # Custom Velocity Route Braking: Slow down linearly within 5 meters of the destination!
+                fly_speed = min(3.0, distance_to_target * 0.6) if distance_to_target > 0.1 else 0.0
                 vx = (dx / distance_to_target) * fly_speed if distance_to_target > 0.1 else 0.0
                 vy = (dy / distance_to_target) * fly_speed if distance_to_target > 0.1 else 0.0
                 
-                current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0) if self.home_alt else 0.0
+                current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0 if self.home_alt is not None else 0.0) if self.home_alt else 0.0
                 dz = -10.0 - current_ned_z
                 vz = max(-2.0, min(2.0, dz * 0.5))
                 
@@ -237,12 +239,12 @@ class SkyPalMissionCommander(Node):
                 msg.yaw = target_yaw
 
         elif self.state == 'LANDING':
-            dist_xy = distance_to_target
-            vx = (dx / dist_xy) * min(1.0, dist_xy * 0.5) if dist_xy > 0.1 else 0.0
-            vy = (dy / dist_xy) * min(1.0, dist_xy * 0.5) if dist_xy > 0.1 else 0.0
+            # Target is already enveloped within 0.5m variance. Arrest all horizontal P-loops instantly to kill oscillations.
+            vx = 0.0
+            vy = 0.0
                 
             # Execute 2-Stage Parabolic Velocity Drop: 1.0 m/s free-fall until 2.0m, then 0.15 m/s buttery cushion
-            current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0) if self.home_alt else 0.0
+            current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0 if self.home_alt is not None else 0.0) if self.home_alt else 0.0
             if current_ned_z < -2.0:
                 vz = 1.0
             else:
