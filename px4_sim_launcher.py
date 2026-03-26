@@ -6,7 +6,9 @@ import threading
 import queue
 import os
 import signal
+import sys
 import time
+import rclpy
 
 # Dictionary of command templates with placeholders for dynamic values
 COMMAND_TEMPLATES = [
@@ -86,6 +88,34 @@ class ProcessTab(ttk.Frame):
             self.stop_process()
             
         self.after(100, self.update_text)
+
+    def start_ros2_nodes(self):
+        try:
+            # We explicitly decouple the stdout into a readable PIPE and construct a logging thread
+            self.ros_proc = subprocess.Popen(
+                ["ros2", "launch", "skypal_core", "sitl_drone_core.launch.py"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            
+            # Spawn a persistent logging daemon tracking the drone commander's pulse
+            def log_ros2_output():
+                with open("/home/skypal/skypal_ws/ros2_mission_diagnostics.log", "w") as f:
+                    for line in iter(self.ros_proc.stdout.readline, ''):
+                        if line:
+                            print(f"[ROS2] {line.strip()}")
+                            f.write(line)
+                            f.flush()
+                            
+            self.log_thread = threading.Thread(target=log_ros2_output, daemon=True)
+            self.log_thread.start()
+            
+            print("Successfully launched SkyPal Drone Core nodes! Live diagnostics streaming to ros2_mission_diagnostics.log")
+            
+        except Exception as e:
+            print(f"Error launching ROS2 nodes: {e}")
 
     def start_process(self):
         if self.process is None:
@@ -400,7 +430,7 @@ class MissionControlTab(ttk.Frame):
         send = self.send_marker.position
         recv = self.receive_marker.position
         payload = f"{send[0]},{send[1]},{recv[0]},{recv[1]}"
-        cmd = f"source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/local_mission std_msgs/msg/String '{{data: \"{payload}\"}}'"
+        cmd = f"source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/autonomous_mission std_msgs/msg/String '{{data: \"{payload}\"}}'"
         subprocess.Popen(cmd, shell=True, executable='/bin/bash')
         
     def rc_override(self):
