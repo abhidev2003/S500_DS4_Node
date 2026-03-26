@@ -167,7 +167,7 @@ class SkyPalMissionCommander(Node):
         # Blind the LiDAR collision protocol specifically when launching from or touching the ground
         is_near_ground = False
         if self.home_alt is not None:
-            if abs(self.current_alt - self.home_alt) < 4.0:
+            if abs(self.current_alt - float(self.home_alt)) < 4.0:
                 is_near_ground = True
 
         if not is_near_ground and (math.isnan(self.lidar_distance) or self.lidar_distance < 3.0):
@@ -217,8 +217,14 @@ class SkyPalMissionCommander(Node):
             if not hasattr(self, 'landing_z_setpoint'):
                 self.landing_z_setpoint = -10.0 # Assumes entry from the prior GLIDE plane
                 
-            # Dictate 0.15 m/s physical descent exactly against the absolute Position-block (dt=0.1s at 10Hz = 0.015m)
-            self.landing_z_setpoint += 0.015
+            # Execute 2-Stage Parabolic Drop: 1.0 m/s free-fall until 2.0m, then 0.15 m/s buttery cushion
+            if self.landing_z_setpoint < -2.0:
+                self.landing_z_setpoint += 0.1
+            else:
+                self.landing_z_setpoint += 0.015
+            
+            if int(current_time * 10) % 20 == 0:
+                self.get_logger().info(f"Descending precisely... Z-Plane locked to: {self.landing_z_setpoint:.2f}m")
             
             # Override pure-velocity vectors preventing PX4 from stubbornly holding the Z-plane indefinitely in Position mode
             msg.position = [self.target_ned_x, self.target_ned_y, self.landing_z_setpoint]

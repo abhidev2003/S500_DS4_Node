@@ -101,10 +101,24 @@ class PathTrackerNode(Node):
             
         if self.target_index < 0:
             # Reached Home Origin. Execute a heavily cushioned landing.
-            # Positive Z in NED points DOWN. 0.3 m/s is a buttery soft descent.
+            if not hasattr(self, 'landing_z_setpoint'):
+                if len(self.path) > 0:
+                    self.landing_z_setpoint = -(self.current_alt - self.path[0][2])
+                else:
+                    self.landing_z_setpoint = -10.0
+            
+            # The heart_node multiplexer currently forces `OffboardControlMode.position = True`.
+            # To prevent PX4 from overriding our descent logic by snapping back to its last known altitude lock,
+            # we must explicitly command downward Position arrays rather than pure Velocity.
+            # 2-Stage Drop Sequence: 1.0 m/s fall until 2 meters, then 0.15 m/s terminal cushion. (dt=0.05s)
+            if self.landing_z_setpoint < -2.0:
+                self.landing_z_setpoint += 0.05
+            else:
+                self.landing_z_setpoint += 0.0075
+
             setpoint = TrajectorySetpoint()
-            setpoint.position = [float('nan'), float('nan'), float('nan')]
-            setpoint.velocity = [0.0, 0.0, 0.15]
+            setpoint.position = [0.0, 0.0, self.landing_z_setpoint] # 0,0 NED perfectly anchors the drone over the exact physical launch footprint
+            setpoint.velocity = [0.0, 0.0, 0.0]
             setpoint.yawspeed = 0.0
             setpoint.timestamp = int(self.get_clock().now().nanoseconds / 1000)
             self.traj_pub.publish(setpoint)
