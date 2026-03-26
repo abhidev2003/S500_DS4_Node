@@ -15,7 +15,7 @@ The system orbits around a central Python Tkinter Application (`px4_sim_launcher
 
 **GUI Features:**
 * **Dynamic Tab Management**: The GUI dynamically destroys and rebuilds the process terminal tabs (`self.notebook.forget()`) when switching modes to hide irrelevant nodes (e.g., hiding MAVProxy in simulation).
-* **Live Mission Map**: Embeds a `tkintermapview` that tracks the drone in real-time. It runs a background thread executing `ros2 topic echo /fmu/out/vehicle_global_position` tied to the FastDDS server to draw a highly precise red breadcrumb path across the map.
+* **Live Mission Map & Interactive Planner**: Embeds a `tkintermapview`. It tracks the drone via `/fmu/out/vehicle_global_position` red breadcrumbs and allows operators to interactively map out flights by right-clicking on the map to spawn "Send (A)" and "Receive (B)" waypoints! Routing lines are projected globally across the map before the mission is committed to the local FastDDS network.
 
 ---
 
@@ -23,32 +23,32 @@ The system orbits around a central Python Tkinter Application (`px4_sim_launcher
 
 ### `heart_node.py` (The Multiplexer)
 The central nervous system linking the user's RC inputs to PX4.
-* **Velocity Smoothing**: Implements an Exponential Moving Average (EMA) to filter out jitter over the mobile network (JIOPAL/AirFiber).
-* **FLU to FRD Mapping**: Maps standard ROS 2 Twist logic (Forward, Left, Up) mathematically into PX4's Body frame (Forward, Right, Down) dynamically depending on the current Yaw.
-* **Autonomy Yielding**: When an autonomous mission or Custom RTL is triggered, it releases `rc_override` and passively passes along positional logic from the `/skypal/autonomous_trajectory` topic straight to `/fmu/in/trajectory_setpoint`.
-* **QoS Policies**: Crucially binds to `/fmu/out/vehicle_local_position` using `DurabilityPolicy.VOLATILE` (matching PX4's high-speed sensor durability) instead of `TRANSIENT_LOCAL`.
+* **Velocity Smoothing**: Implements an Exponential Moving Average (EMA) to filter out jitter over the mobile network.
+* **FLU to FRD Mapping**: Maps standard ROS 2 Twist logic mathematically into PX4's Body frame.
+* **Autonomy Yielding**: When an autonomous mission or Custom RTL is triggered, it releases `rc_override` and passively passes along localized setpoints.
 
 ### `path_tracker_node.py` (Custom Trace-back RTL)
 Replaces the default PX4 straight-line Return-To-Launch with a reverse trace trajectory.
-* Subscribes to the vehicle's local position and caches an XYZ coordinate tuple every 1 meter of physical movement.
-* Listens to `/skypal/sys_command`. Upon receiving `"nav_rtl"`, it switches to Playback mode.
-* Publishes high-frequency `TrajectorySetpoint` arrays back to the `heart_node` multiplexer to smoothly back-fly waypoint-by-waypoint into the home origin.
+* Bypasses the deactivated PX4 Local Position simulator topic by hijacking the global WGS84 GPS lock directly and mathematically translating coordinate distances independently.
+* Operates an Omni-QoS Subscription strategy (`10`, `qos_profile_sensor_data`, and custom filters) to pierce through undocumented FastDDS Strict Capability isolation policies.
+* Ends trace-backs with a forcefully manipulated `0.15 m/s` customized buttery-soft Offboard descent landing to simulate touch-down without cracking the physical carbon fiber frames.
 
-### `mission_commander.py` (Cloud Firebase Bridge)
-Handles macro-scale API integrations.
-* Periodically polls the `skypal-app-6408` Firestore database for delivery missions.
-* Uses a `PIVOT -> GLIDE -> LANDING -> AWAITING_SCAN` state machine to rotate the drone to the target bearing and push it horizontally to the designated GPS drop-off coordinates using custom WGS84-to-NED conversions.
+### `mission_commander.py` (Autonomous Tactical Dispatcher)
+Operates the fully decentralized Multi-Landing Sequence State Machine.
+* Bypasses Firebase APIs for immediate local Base-Station tactical control by listening directly to `/skypal/local_mission`.
+* Translates the payload coordinates sequentially across an internal execution array logic.
+* **Multi-Landing Sequence**: Employs a complex transition pipeline (`PIVOT -> GLIDE -> LANDING -> AWAITING_TAKEOFF -> PIVOT`). Between waypoints, the drone forcefully commands standard `NAV_LAND` disarm physics dynamically at each stop off and holds the position rigorously for exactly 10 seconds before rocketing identically back into the Z-plane to service the next waypoint natively.
 
 ### `controller_node.py` (Joystick Publisher)
-* Processes Xbox/Playstation controller hardware inputs via `/joy` and packages them into `/skypal/cmd_vel` Twists. 
+* Processes hardware inputs into twists. 
 * Houses the emergency system command buttons configured to send messages like `"arm_offboard"` or `"nav_rtl"`.
 
 ### HITL Camera Nodes (`qr_scanner_node.py` & `camera_recorder_node.py`)
 * Dedicated V4L2 computer vision processes designed to run on the Raspberry Pi edge.
-* `qr_scanner_node.py`: Engages PyZbar over an OpenCV feed only when the drone is landed and disarmed to authorize cloud package drop-offs securely while sparing Pi CPU resources mid-flight.
+* `qr_scanner_node.py`: Engages PyZbar over an OpenCV feed only when the drone is landed and disarmed to authorize payloads safely.
 
 ---
 
 ## 3. Communication Architecture
 * **FastDDS Discovery Server**: We strictly route all XRCE-DDS and internal ROS 2 chatter through a localized discovery server (Port `11811`). This prevents domain ID clashes and forces flawless VPN connectivity across Tailscale. 
-* **Workspace Dependency**: All manual bash subprocesses (like buttons in the Tracker Map GUI) must strictly use `source ~/skypal_ws/install/setup.bash && export ROS_DISCOVERY_SERVER=...` simultaneously to decode the custom `px4_msgs` packet structs properly.
+* **Workspace Dependency**: All manual bash subprocesses strictly use `source ~/skypal_ws/install/setup.bash && export ROS_DISCOVERY_SERVER=...` simultaneously to decode the custom `px4_msgs` packet structs properly.
