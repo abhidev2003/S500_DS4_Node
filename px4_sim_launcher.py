@@ -223,6 +223,20 @@ class MissionControlTab(ttk.Frame):
         ttk.Button(control_frame, text="🛑 ABORT MISSION (RTL)", command=self.abort_mission).pack(side='left', padx=10)
         ttk.Button(control_frame, text="🎮 RC OVERRIDE TOGGLE", command=self.rc_override).pack(side='left', padx=10)
         
+        self.btn_calc_route = ttk.Button(control_frame, text="🗺️ Calculate Route", state="disabled", command=self.calculate_route)
+        self.btn_calc_route.pack(side='left', padx=10)
+        
+        self.btn_initiate = ttk.Button(control_frame, text="🚀 Initiate Mission", state="disabled", command=self.initiate_mission)
+        self.btn_initiate.pack(side='left', padx=10)
+
+        # Map Interaction Handlers
+        self.send_marker = None
+        self.receive_marker = None
+        self.mission_route_obj = None
+
+        self.map_widget.add_right_click_menu_command(label="Set Send Location", command=self.set_send_location, pass_coords=True)
+        self.map_widget.add_right_click_menu_command(label="Set Receive Location", command=self.set_receive_location, pass_coords=True)
+        
         self.stream_ros_location()
 
     def update_map_gui(self, lat, lon):
@@ -281,6 +295,45 @@ class MissionControlTab(ttk.Frame):
 
     def abort_mission(self):
         cmd = "source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"nav_rtl\"}'"
+        subprocess.Popen(cmd, shell=True, executable='/bin/bash')
+        
+    def set_send_location(self, coords):
+        if self.send_marker:
+            self.send_marker.set_position(coords[0], coords[1])
+        else:
+            self.send_marker = self.map_widget.set_marker(coords[0], coords[1], text="Send (A)", marker_color_circle="#0000FF", marker_color_outside="#000080")
+        self.check_route_ready()
+
+    def set_receive_location(self, coords):
+        if self.receive_marker:
+            self.receive_marker.set_position(coords[0], coords[1])
+        else:
+            self.receive_marker = self.map_widget.set_marker(coords[0], coords[1], text="Receive (B)", marker_color_circle="#00FF00", marker_color_outside="#008000")
+        self.check_route_ready()
+
+    def check_route_ready(self):
+        if self.send_marker and self.receive_marker:
+            self.btn_calc_route.configure(state="normal")
+
+    def calculate_route(self):
+        home_coords = self.drone_marker.position if hasattr(self, 'drone_marker') else (37.412173, -121.998879)
+        send_coords = self.send_marker.position
+        recv_coords = self.receive_marker.position
+        
+        path = [home_coords, send_coords, recv_coords, home_coords]
+        
+        if self.mission_route_obj:
+            self.mission_route_obj.set_position_list(path)
+        else:
+            self.mission_route_obj = self.map_widget.set_path(path, color="#FFA500", width=3)
+            
+        self.btn_initiate.configure(state="normal")
+
+    def initiate_mission(self):
+        send = self.send_marker.position
+        recv = self.receive_marker.position
+        payload = f"{send[0]},{send[1]},{recv[0]},{recv[1]}"
+        cmd = f"source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/local_mission std_msgs/msg/String '{{data: \"{payload}\"}}'"
         subprocess.Popen(cmd, shell=True, executable='/bin/bash')
         
     def rc_override(self):
