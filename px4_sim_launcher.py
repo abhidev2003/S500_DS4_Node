@@ -430,7 +430,7 @@ class MissionControlTab(ttk.Frame):
         send = self.send_marker.position
         recv = self.receive_marker.position
         payload = f"{send[0]},{send[1]},{recv[0]},{recv[1]}"
-        cmd = f"source /opt/ros/humble/setup.bash && ros2 topic pub --once /skypal/autonomous_mission std_msgs/msg/String '{{data: \"{payload}\"}}'"
+        cmd = f"source /opt/ros/humble/setup.bash && ros2 topic pub --once /skypal/local_mission std_msgs/msg/String '{{data: \"{payload}\"}}'"
         subprocess.Popen(cmd, shell=True, executable='/bin/bash')
         
     def rc_override(self):

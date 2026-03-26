@@ -64,7 +64,7 @@ class SkyPalMissionCommander(Node):
         if self.state != 'IDLE':
             self.get_logger().warn("Mission physically in progress! Ignoring local dispatch until current queue clears.")
             return
-    def mission_receive_cb(self, msg):
+
         coords = msg.data.split(',')
         if len(coords) == 4:
             self.get_logger().info(f"Interlocked GUI Waypoints: {coords} -> Deploying Route Calculator!")
