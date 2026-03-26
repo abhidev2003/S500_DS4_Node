@@ -232,7 +232,7 @@ class MissionControlTab(ttk.Frame):
     def stream_ros_location(self):
         # Read the GPS topic directly from ROS 2 at 10Hz locally instead of polling the cloud
         def _tail_gps():
-            cmd = "source /opt/ros/humble/setup.bash && PYTHONUNBUFFERED=1 ros2 topic echo /fmu/out/vehicle_global_position px4_msgs/msg/VehicleGlobalPosition"
+            cmd = "source /opt/ros/humble/setup.bash && source ~/skypal_ws/install/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && PYTHONUNBUFFERED=1 ros2 topic echo /fmu/out/vehicle_global_position px4_msgs/msg/VehicleGlobalPosition"
             proc = subprocess.Popen(cmd, shell=True, executable='/bin/bash', stdout=subprocess.PIPE, text=True, preexec_fn=os.setsid)
             
             current_lat = None
@@ -258,11 +258,11 @@ class MissionControlTab(ttk.Frame):
         threading.Thread(target=_tail_gps, daemon=True).start()
 
     def abort_mission(self):
-        cmd = "source /opt/ros/humble/setup.bash && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"nav_rtl\"}'"
+        cmd = "source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"nav_rtl\"}'"
         subprocess.Popen(cmd, shell=True, executable='/bin/bash')
         
     def rc_override(self):
-        cmd = "source /opt/ros/humble/setup.bash && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"rc_override_toggle\"}'"
+        cmd = "source /opt/ros/humble/setup.bash && export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && ros2 topic pub --once /skypal/sys_command std_msgs/msg/String '{data: \"rc_override_toggle\"}'"
         subprocess.Popen(cmd, shell=True, executable='/bin/bash')
 
 class PX4SkypalLauncher(tk.Tk):
