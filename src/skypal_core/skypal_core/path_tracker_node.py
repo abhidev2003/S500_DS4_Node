@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from px4_msgs.msg import VehicleLocalPosition, TrajectorySetpoint
+from px4_msgs.msg import VehicleGlobalPosition, TrajectorySetpoint
 from std_msgs.msg import String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import math
@@ -12,67 +12,73 @@ class PathTrackerNode(Node):
     def __init__(self):
         super().__init__('path_tracker_node')
         
-        qos_profile = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-        
         from rclpy.qos import qos_profile_sensor_data
         
-        # Shotgun QoS Subscription Strategy: Bind to all 3 PX4 RMW policies simultaneously
-        # Distance-checking natively inherently drops all duplicates.
-        self.local_pos_sub_1 = self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.pos_callback, qos_profile)
-        self.local_pos_sub_2 = self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.pos_callback, 10)
-        self.local_pos_sub_3 = self.create_subscription(VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.pos_callback, qos_profile_sensor_data)
+        self.global_pos_sub = self.create_subscription(VehicleGlobalPosition, '/fmu/out/vehicle_global_position', self.pos_callback, qos_profile_sensor_data)
         self.sys_cmd_sub = self.create_subscription(String, '/skypal/sys_command', self.sys_cmd_callback, 10)
         self.traj_pub = self.create_publisher(TrajectorySetpoint, '/skypal/autonomous_trajectory', 10)
         
-        self.path = [] # List of (N, E, D) -> (X, Y, Z) tuples
-        self.record_threshold = 1.0 # Meters minimum between logged breadcrumbs
+        self.path = [] # List of (lat, lon, alt)
+        self.record_threshold = 1.0 # Meters logic
         self.is_rtl = False
         self.target_index = -1
         
-        self.current_x = 0.0
-        self.current_y = 0.0
-        self.current_z = 0.0
+        self.current_lat = 0.0
+        self.current_lon = 0.0
+        self.current_alt = 0.0
         
-        # 20Hz trajectory playback
         self.dt = 0.05 
         self.timer = self.create_timer(self.dt, self.execute_rtl)
         
-        self.get_logger().info("Skypal Path Tracker Node started. Logging flight path...")
+        self.get_logger().info("Skypal Global Path Tracker Started. Intercepting GPS...")
+
+    def wgs84_to_ned(self, target_lat, target_lon, ref_lat, ref_lon):
+        r_earth = 6378137.0
+        lat_rad = math.radians(ref_lat)
+        target_lat_rad = math.radians(target_lat)
+        
+        d_lat = target_lat_rad - lat_rad
+        d_lon = math.radians(target_lon) - math.radians(ref_lon)
+        
+        x = r_earth * d_lat
+        y = r_earth * math.cos(lat_rad) * d_lon
+        return x, y
 
     def pos_callback(self, msg):
-        self.current_x = msg.x
-        self.current_y = msg.y
-        self.current_z = msg.z
+        # We must ignore the origin null island lock
+        if msg.lat == 0.0 and msg.lon == 0.0:
+            return
+            
+        self.current_lat = msg.lat
+        self.current_lon = msg.lon
+        self.current_alt = msg.alt
         
         if not self.is_rtl:
             if len(self.path) == 0:
-                self.path.append((msg.x, msg.y, msg.z))
+                self.path.append((msg.lat, msg.lon, msg.alt))
+                self.get_logger().info("First Global Origin locked. Tracking outbound sequence...")
             else:
-                last_p = self.path[-1]
-                dist = math.sqrt((msg.x - last_p[0])**2 + (msg.y - last_p[1])**2 + (msg.z - last_p[2])**2)
+                last_lat, last_lon, last_alt = self.path[-1]
+                dx, dy = self.wgs84_to_ned(msg.lat, msg.lon, last_lat, last_lon)
+                dz_ned = -(msg.alt - last_alt)
+                
+                dist = math.sqrt(dx**2 + dy**2 + dz_ned**2)
                 if dist > self.record_threshold:
-                    self.path.append((msg.x, msg.y, msg.z))
+                    self.path.append((msg.lat, msg.lon, msg.alt))
         
     def sys_cmd_callback(self, msg):
         if msg.data == "nav_rtl":
             if not self.is_rtl:
-                self.get_logger().info(f"RTL Triggered! Engaged Trace-Back Protocol. Route has {len(self.path)} steps.")
+                self.get_logger().info(f"RTL Triggered! Engaged Trace-Back. Route length: {len(self.path)} steps.")
                 self.is_rtl = True
                 if len(self.path) > 0:
                     self.target_index = len(self.path) - 1
 
     def execute_rtl(self):
-        # We only govern flight velocity during the active backtracking RTL sequence
         if not self.is_rtl:
             return
             
         if self.target_index < 0:
-            # We reached index 0 smoothly. Hover indefinitely exactly at the home origin.
             setpoint = TrajectorySetpoint()
             setpoint.position = [float('nan'), float('nan'), float('nan')]
             setpoint.velocity = [0.0, 0.0, 0.0]
@@ -81,44 +87,37 @@ class PathTrackerNode(Node):
             self.traj_pub.publish(setpoint)
             return
             
-        target = self.path[self.target_index]
-        dx = target[0] - self.current_x
-        dy = target[1] - self.current_y
-        dz = target[2] - self.current_z
+        target_lat, target_lon, target_alt = self.path[self.target_index]
+        dx, dy = self.wgs84_to_ned(target_lat, target_lon, self.current_lat, self.current_lon)
+        dz_ned = -(target_alt - self.current_alt) 
         
-        dist = math.sqrt(dx**2 + dy**2 + dz**2)
+        dist = math.sqrt(dx**2 + dy**2 + dz_ned**2)
         
-        # When within a 1 meter radius bubble, advance backwards to the previous mapped vertex
         if dist < 1.0: 
             self.target_index -= 1
-            
             if self.target_index < 0:
-                self.get_logger().info("Successfully arrived at Home Origin. Holding hover!")
+                self.get_logger().info("Successfully arrived at Home Origin. Holding hover.")
                 return
-                
-            target = self.path[self.target_index]
-            dx = target[0] - self.current_x
-            dy = target[1] - self.current_y
-            dz = target[2] - self.current_z
-            dist = math.sqrt(dx**2 + dy**2 + dz**2)
+            target_lat, target_lon, target_alt = self.path[self.target_index]
+            dx, dy = self.wgs84_to_ned(target_lat, target_lon, self.current_lat, self.current_lon)
+            dz_ned = -(target_alt - self.current_alt)
+            dist = math.sqrt(dx**2 + dy**2 + dz_ned**2)
 
-        fly_speed = 3.0 # Meters per second back-flight
+        fly_speed = 3.0 
         if dist > 0:
             vx = (dx / dist) * fly_speed
             vy = (dy / dist) * fly_speed
-            vz = (dz / dist) * fly_speed
+            vz = (dz_ned / dist) * fly_speed
         else:
             vx, vy, vz = 0.0, 0.0, 0.0
             
         yaw = math.atan2(vy, vx)
         
-        # Dispatch the localized speed vectors to the Heart node's multiplexing listener
         setpoint = TrajectorySetpoint()
         setpoint.position = [float('nan'), float('nan'), float('nan')]
         setpoint.velocity = [vx, vy, vz]
         setpoint.yaw = yaw
         setpoint.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        
         self.traj_pub.publish(setpoint)
 
 def main(args=None):
