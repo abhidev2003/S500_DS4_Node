@@ -167,7 +167,7 @@ class SkyPalMissionCommander(Node):
         # Blind the LiDAR collision protocol specifically when launching from or touching the ground
         is_near_ground = False
         if self.home_alt is not None:
-            if abs(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0 if self.home_alt is not None else 0.0) < 4.0:
+            if abs(self.current_alt - float(self.home_alt)) < 4.0:
                 is_near_ground = True
 
         if not is_near_ground and (math.isnan(self.lidar_distance) or self.lidar_distance < 3.0):
@@ -185,25 +185,22 @@ class SkyPalMissionCommander(Node):
         dy = self.target_ned_y - current_ned_y
         distance_to_target = math.sqrt(dx**2 + dy**2)
         
-        target_yaw = math.atan2(dy, dx)
+        if distance_to_target > 1.0:
+            target_yaw = math.atan2(dy, dx)
+        else:
+            target_yaw = self.current_heading
+            
         yaw_error = target_yaw - self.current_heading
         
         while yaw_error > math.pi: yaw_error -= 2 * math.pi
         while yaw_error < -math.pi: yaw_error += 2 * math.pi
 
         if self.state == 'PIVOT':
-            if not hasattr(self, 'takeoff_ned_x'):
-                self.takeoff_ned_x = current_ned_x
-                self.takeoff_ned_y = current_ned_y
-                
-            dx_p = self.takeoff_ned_x - current_ned_x
-            dy_p = self.takeoff_ned_y - current_ned_y
-            dist_p = math.sqrt(dx_p**2 + dy_p**2)
+            # Stop moving horizontally, just spin the yaw and climb to Z=-10.0
+            vx = 0.0
+            vy = 0.0
             
-            vx = (dx_p / dist_p) * min(1.0, dist_p * 0.5) if dist_p > 0.1 else 0.0
-            vy = (dy_p / dist_p) * min(1.0, dist_p * 0.5) if dist_p > 0.1 else 0.0
-            
-            current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0 if self.home_alt is not None else 0.0) if self.home_alt else 0.0
+            current_ned_z = -(self.current_alt - float(self.home_alt)) if self.home_alt is not None else 0.0
             dz = -10.0 - current_ned_z
             vz = max(-2.0, min(2.0, dz * 0.5))
             
@@ -218,19 +215,19 @@ class SkyPalMissionCommander(Node):
                 self.get_logger().info("Altitude Reached! Engaging 3.0m/s GLIDE thrust.")
 
         elif self.state == 'GLIDE':
-            if abs(yaw_error) > 0.5: 
-                self.state = 'PIVOT'
-            elif distance_to_target < 0.5:
+            if distance_to_target < 0.5:
                 # Only dispatch the DROP cycle when the drone has entirely exhausted its X/Y momentum organically!
                 self.state = 'LANDING'
                 self.get_logger().info(f"Waypoint Reached! Dispatching Auto-Landing block {self.current_wp_index}...")
+            elif abs(yaw_error) > 0.5 and distance_to_target > 2.0: 
+                self.state = 'PIVOT'
             else:
                 # Custom Velocity Route Braking: Slow down linearly within 5 meters of the destination!
                 fly_speed = min(3.0, distance_to_target * 0.6) if distance_to_target > 0.1 else 0.0
                 vx = (dx / distance_to_target) * fly_speed if distance_to_target > 0.1 else 0.0
                 vy = (dy / distance_to_target) * fly_speed if distance_to_target > 0.1 else 0.0
                 
-                current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0 if self.home_alt is not None else 0.0) if self.home_alt else 0.0
+                current_ned_z = -(self.current_alt - float(self.home_alt)) if self.home_alt is not None else 0.0
                 dz = -10.0 - current_ned_z
                 vz = max(-2.0, min(2.0, dz * 0.5))
                 
@@ -244,7 +241,7 @@ class SkyPalMissionCommander(Node):
             vy = 0.0
                 
             # Execute 2-Stage Parabolic Velocity Drop: 1.0 m/s free-fall until 2.0m, then 0.15 m/s buttery cushion
-            current_ned_z = -(self.current_alt - float(self.home_alt) if self.home_alt is not None else 0.0 if self.home_alt is not None else 0.0) if self.home_alt else 0.0
+            current_ned_z = -(self.current_alt - float(self.home_alt)) if self.home_alt is not None else 0.0
             if current_ned_z < -2.0:
                 vz = 1.0
             else:
