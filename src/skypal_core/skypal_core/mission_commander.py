@@ -51,8 +51,15 @@ class SkyPalMissionCommander(Node):
         self.alt_history = []
         self.is_physically_landed = False
 
-        self.lidar_distance = float('inf')
-        self.lidar_active = False
+        self.lidar_distance = 12.0
+        self.local_2d_map = {}
+        self.breadcrumb_trail = []
+        self.scan_original_yaw = 0.0
+        self.sweep_yaw = 0.0
+        self.dodge_target_yaw = 0.0
+        self.dodge_start_x = 0.0
+        self.dodge_start_y = 0.0
+        self.hop_distance = 6.0
         self.is_grounded = False
 
         self.target_ned_x = 0.0
@@ -152,9 +159,7 @@ class SkyPalMissionCommander(Node):
         self.is_grounded = msg.ground_contact or msg.landed
 
     def distance_cb(self, msg):
-        if msg.orientation == 1 or True: 
-            self.lidar_distance = msg.current_distance
-            self.lidar_active = True
+        self.lidar_distance = msg.current_distance
 
     def global_pos_cb(self, msg):
         self.current_lat = msg.lat
@@ -215,12 +220,6 @@ class SkyPalMissionCommander(Node):
             if abs(self.current_alt - float(self.home_alt)) < 4.0:
                 is_near_ground = True
 
-        if not is_near_ground and (math.isnan(self.lidar_distance) or self.lidar_distance < 3.0):
-            self.get_logger().warn(f"EMERGENCY: Lidar Obstacle tripped at {self.lidar_distance}m! Loitering mode engaged.")
-            self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LOITER)
-            if self.state == 'GLIDE':
-                self.state = 'PIVOT'
-
         msg = TrajectorySetpoint()
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
 
@@ -260,6 +259,17 @@ class SkyPalMissionCommander(Node):
                 self.get_logger().info("Altitude Reached! Engaging 3.0m/s GLIDE thrust.")
 
         elif self.state == 'GLIDE':
+            current_ned_z = -(self.current_alt - float(self.home_alt)) if self.home_alt is not None else 0.0
+            
+            # Autonomous Architecture Obstacle Intercept Trigger
+            if abs(current_ned_z) >= 4.0 and self.lidar_distance < 4.0 and self.current_wp_action != 'LAND':
+                self.get_logger().warn(f"OBSTACLE DETECTED at {self.lidar_distance:.1f}m! Initiating 180° Grid-Hop Radar Scan.")
+                self.scan_original_yaw = self.current_heading
+                self.sweep_yaw = self.current_heading
+                self.local_2d_map = {}
+                self.state = 'EVADE_SCAN_LEFT'
+                return
+                
             # Dynamic thresholding logic: fly-through nodes (FLY) span loosely to preserve momentum, terminal nodes (LAND) tighten to 0.3m.
             threshold = 1.5 if self.current_wp_action == 'FLY' else 0.3
             
@@ -297,6 +307,139 @@ class SkyPalMissionCommander(Node):
                 
                 msg.yaw = target_yaw
 
+        elif self.state == 'EVADE_SCAN_LEFT':
+            target_left = self.scan_original_yaw - 1.5708
+            while target_left < -math.pi: target_left += 2.0 * math.pi
+            err = abs(target_left - self.current_heading)
+            if err > math.pi: err = 2.0 * math.pi - err
+            
+            if err < 0.15:
+                 self.get_logger().info("Oriented to Left Bound (-90°). Commencing High-Density 180° Right Sweep!")
+                 self.sweep_yaw = self.current_heading
+                 self.state = 'EVADE_SCAN_RIGHT'
+            else:
+                 self.sweep_yaw = self.current_heading - 0.04
+                 while self.sweep_yaw < -math.pi: self.sweep_yaw += 2.0 * math.pi
+                 
+                 msg.position = [float('nan'), float('nan'), float('nan')]
+                 current_ned_z = -(self.current_alt - float(self.home_alt)) if self.home_alt is not None else 0.0
+                 msg.velocity = [0.0, 0.0, max(-2.0, min(2.0, (-10.0 - current_ned_z) * 0.5))]
+                 msg.yaw = self.sweep_yaw
+                 
+                 # Depth Mapping Array Tracker
+                 rel_yaw = self.current_heading - self.scan_original_yaw
+                 while rel_yaw > math.pi: rel_yaw -= 2.0 * math.pi
+                 while rel_yaw < -math.pi: rel_yaw += 2.0 * math.pi
+                 
+                 bin_idx = int(math.degrees(rel_yaw) / 5.0) * 5
+                 dist = self.lidar_distance if not math.isnan(self.lidar_distance) else 12.0
+                 if bin_idx not in self.local_2d_map or dist < self.local_2d_map[bin_idx]:
+                     self.local_2d_map[bin_idx] = dist
+                     
+        elif self.state == 'EVADE_SCAN_RIGHT':
+            target_right = self.scan_original_yaw + 1.5708
+            while target_right > math.pi: target_right -= 2.0 * math.pi
+            err = abs(target_right - self.current_heading)
+            if err > math.pi: err = 2.0 * math.pi - err
+            
+            if err < 0.15:
+                 self.get_logger().info(f"180° Sweep Complete! Captured {len(self.local_2d_map)} spatial footprint blocks. Analyzing clearance geometry...")
+                 self.state = 'EVADE_COMPUTE'
+            else:
+                 self.sweep_yaw = self.current_heading + 0.04
+                 while self.sweep_yaw > math.pi: self.sweep_yaw -= 2.0 * math.pi
+                 
+                 msg.position = [float('nan'), float('nan'), float('nan')]
+                 current_ned_z = -(self.current_alt - float(self.home_alt)) if self.home_alt is not None else 0.0
+                 msg.velocity = [0.0, 0.0, max(-2.0, min(2.0, (-10.0 - current_ned_z) * 0.5))]
+                 msg.yaw = self.sweep_yaw
+                 
+                 # Depth Mapping Array Tracker
+                 rel_yaw = self.current_heading - self.scan_original_yaw
+                 while rel_yaw > math.pi: rel_yaw -= 2.0 * math.pi
+                 while rel_yaw < -math.pi: rel_yaw += 2.0 * math.pi
+                 
+                 bin_idx = int(math.degrees(rel_yaw) / 5.0) * 5
+                 dist = self.lidar_distance if not math.isnan(self.lidar_distance) else 12.0
+                 if bin_idx not in self.local_2d_map or dist < self.local_2d_map[bin_idx]:
+                     self.local_2d_map[bin_idx] = dist
+
+        elif self.state == 'EVADE_COMPUTE':
+            safe_bins = sorted([b for b, dist in self.local_2d_map.items() if dist >= 6.0])
+            clusters = []
+            curr_cluster = [safe_bins[0]] if safe_bins else []
+            for i in range(1, len(safe_bins)):
+                if safe_bins[i] - safe_bins[i-1] <= 35:
+                    curr_cluster.append(safe_bins[i])
+                else:
+                    clusters.append(curr_cluster)
+                    curr_cluster = [safe_bins[i]]
+            if curr_cluster: clusters.append(curr_cluster)
+            
+            valid_clusters = []
+            for c in clusters:
+                if len(c) == 0: continue
+                angular_width_deg = abs(c[-1] - c[0]) + 5.0
+                physical_width_m = 6.0 * math.radians(angular_width_deg) 
+                
+                if physical_width_m >= 1.0: 
+                    # Breadcrumb filter block
+                    center_bin = sum(c) / len(c)
+                    candidate_yaw = self.scan_original_yaw + math.radians(center_bin)
+                    
+                    hop_dist = min(6.0, distance_to_target)
+                    hyp_x = current_ned_x + hop_dist * math.cos(candidate_yaw)
+                    hyp_y = current_ned_y + hop_dist * math.sin(candidate_yaw)
+                    
+                    too_close = False
+                    for crumb in self.breadcrumb_trail:
+                        dist_to_crumb = math.sqrt((hyp_x - crumb[0])**2 + (hyp_y - crumb[1])**2)
+                        if hop_dist > 3.5 and dist_to_crumb <= 3.5:
+                            too_close = True
+                            self.get_logger().warn(f"Tabu Filter: Rejecting Gap at {center_bin:.1f}°. Tracks into historically blocked array!")
+                            break
+                    if not too_close:
+                        valid_clusters.append(c)
+                else:
+                    self.get_logger().warn(f"Physics Geometry Filter: Rejecting physical gap width of {physical_width_m:.1f}m. Smaller than frame clearance.")
+                    
+            if valid_clusters:
+                 best_cluster = min(valid_clusters, key=lambda c: abs(sum(c)/len(c)))
+                 center_bin = sum(best_cluster) / len(best_cluster)
+                 self.dodge_target_yaw = self.scan_original_yaw + math.radians(center_bin)
+                 self.get_logger().info(f"Target Line Obscured. Diverting Grid-Hop Vector smoothly through {center_bin:.1f}°")
+            elif clusters:
+                 best_cluster = min(clusters, key=lambda c: abs(sum(c)/len(c)))
+                 center_bin = sum(best_cluster) / len(best_cluster)
+                 self.dodge_target_yaw = self.scan_original_yaw + math.radians(center_bin)
+                 self.get_logger().warn(f"Geometry Width requirements failed. Squeezing tightly through fragmented {center_bin:.1f}° target.")
+            else:
+                 self.get_logger().error("FATAL: Map is mathematically completely horizontally bound! Punching directly over coordinates safely!")
+                 self.dodge_target_yaw = self.scan_original_yaw
+                 
+            self.dodge_start_x = current_ned_x
+            self.dodge_start_y = current_ned_y
+            self.hop_distance = min(6.0, distance_to_target)
+            self.state = 'EVADE_HOP'
+
+        elif self.state == 'EVADE_HOP':
+            dist_flown = math.sqrt((current_ned_x - self.dodge_start_x)**2 + (current_ned_y - self.dodge_start_y)**2)
+            
+            if dist_flown >= self.hop_distance or distance_to_target < 1.0:
+                self.get_logger().info(f"{self.hop_distance:.1f}m Sprint Hop complete. Re-acquiring target trajectory into primary GLIDE trace.")
+                self.breadcrumb_trail.append((current_ned_x, current_ned_y))
+                if len(self.breadcrumb_trail) > 20: self.breadcrumb_trail.pop(0)
+                self.state = 'GLIDE'
+                return
+                
+            msg.position = [float('nan'), float('nan'), float('nan')]
+            vx = 2.5 * math.cos(self.dodge_target_yaw)
+            vy = 2.5 * math.sin(self.dodge_target_yaw)
+            
+            current_ned_z = -(self.current_alt - float(self.home_alt)) if self.home_alt is not None else 0.0
+            msg.velocity = [vx, vy, max(-2.0, min(2.0, (-10.0 - current_ned_z) * 0.5))]
+            msg.yaw = self.dodge_target_yaw
+
         elif self.state == 'LANDING':
             # Target is already enveloped within 0.5m variance. Arrest all horizontal P-loops instantly to kill oscillations.
             vx = 0.0
@@ -322,12 +465,12 @@ class SkyPalMissionCommander(Node):
                 self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0, 21196.0)
                 self.state = 'AWAITING_APPROVAL'
                 
-                # Push GUI Checkpoint Notification
+                # Push GUI Checkpoint Notification — prefix with ARRIVED_ so the GUI listener matches
                 status_msg = String()
-                status_msg.data = self.current_wp_tag
+                status_msg.data = f"ARRIVED_{self.current_wp_tag}"
                 self.status_pub.publish(status_msg)
                 
-                self.get_logger().info(f"Touchdown verified mathematically via rolling altimeter buffer! Disarmed. Active Status: {status_msg.data}")
+                self.get_logger().info(f"Touchdown confirmed! GUI notified with status: {status_msg.data}")
             
         elif self.state == 'AWAITING_APPROVAL':
             # Publish explicit zero-velocity grounding arrays while dropping the Position block completely
